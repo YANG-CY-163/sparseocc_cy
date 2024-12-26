@@ -9,10 +9,26 @@ from .matcher import HungarianMatcher
 from .loss_utils import CE_ssc_loss, lovasz_softmax, get_voxel_decoder_loss_input
 
 
-NUSC_CLASS_FREQ = np.array([
-    944004, 1897170, 152386, 2391677, 16957802, 724139, 189027, 2074468, 413451, 2384460,
-    5916653, 175883646, 4275424, 51393615, 61411620, 105975596, 116424404, 1892500630
-])
+NUSC_CLASS_FREQ_MAP = {
+    'others': 944004, 
+    'barrier': 1897170, 
+    'bicycle': 152386, 
+    'bus': 2391677, 
+    'car': 16957802, 
+    'construction_vehicle': 724139, 
+    'motorcycle': 189027, 
+    'pedestrian': 2074468, 
+    'traffic_cone': 413451, 
+    'trailer': 2384460,
+    'truck': 5916653, 
+    'driveable_surface': 175883646, 
+    'other_flat': 4275424, 
+    'sidewalk': 51393615, 
+    'terrain': 61411620, 
+    'manmade': 105975596, 
+    'vegetation': 116424404, 
+    'free': 1892500630
+}
 
 
 @HEADS.register_module()
@@ -40,7 +56,12 @@ class SparseOccHead(nn.Module):
         self.criterions = {k: build_loss(loss_cfg) for k, loss_cfg in loss_cfgs.items()}
         self.matcher = HungarianMatcher(cost_class=2.0, cost_mask=5.0, cost_dice=5.0)
 
-        self.class_weights = torch.from_numpy(1 / np.log(NUSC_CLASS_FREQ + 0.001))
+       
+        # TODO freq for openocc_v2
+        class_freqs = [NUSC_CLASS_FREQ_MAP[name] for name in self.class_names]
+        class_weights = 1 / np.log(np.array(class_freqs) + 0.001)
+        self.class_weights = torch.from_numpy(class_weights)
+
 
     def init_weights(self):
         self.transformer.init_weights()
@@ -56,10 +77,10 @@ class SparseOccHead(nn.Module):
         }
 
     @force_fp32(apply_to=('preds_dicts'))
-    def loss(self, voxel_semantics, voxel_instances, instance_class_ids, preds_dicts, mask_camera=None):
-        return self.loss_single(voxel_semantics, voxel_instances, instance_class_ids, preds_dicts, mask_camera)
+    def loss(self, voxel_semantics, voxel_instances, instance_class_ids, flow_gt, preds_dicts, mask_camera=None):
+        return self.loss_single(voxel_semantics, voxel_instances, instance_class_ids, flow_gt, preds_dicts, mask_camera)
 
-    def loss_single(self, voxel_semantics, voxel_instances, instance_class_ids, preds_dicts, mask_camera=None):
+    def loss_single(self, voxel_semantics, voxel_instances, instance_class_ids, flow_gt, preds_dicts, mask_camera=None):
         loss_dict = {}
         B = voxel_instances.shape[0]
 
@@ -67,14 +88,16 @@ class SparseOccHead(nn.Module):
             assert mask_camera.shape == voxel_semantics.shape
             assert mask_camera.dtype == torch.bool
         
-        for i, (occ_loc_i, _, seg_pred_i, _, scale) in enumerate(preds_dicts['occ_preds']):
+        for i, (occ_loc_i, _, seg_pred_i, flow_pred_i, _, scale) in enumerate(preds_dicts['occ_preds']):
             loss_dict_i = {}
             for b in range(B):
                 loss_dict_i_b = {}
-                seg_pred_i_sparse, voxel_semantics_sparse, sparse_mask = get_voxel_decoder_loss_input(
+                seg_pred_i_sparse, voxel_semantics_sparse, flow_pred_i_sparse, flow_gt_sparse, sparse_mask = get_voxel_decoder_loss_input(
                     voxel_semantics[b:b + 1],
+                    flow_gt[b:b + 1],
                     occ_loc_i[b:b + 1],
                     seg_pred_i[b:b + 1] if seg_pred_i is not None else None,
+                    flow_pred_i[b:b + 1] if flow_pred_i is not None else None,
                     scale,
                     self.num_classes
                 )
@@ -84,6 +107,18 @@ class SparseOccHead(nn.Module):
                 valid_mask = (voxel_semantics_sparse < 255)
                 seg_pred_i_sparse = seg_pred_i_sparse[valid_mask].transpose(0, 1).unsqueeze(0)  # [K, CLS] -> [B, CLS, K]
                 voxel_semantics_sparse = voxel_semantics_sparse[valid_mask].unsqueeze(0)  # [K] -> [B, K]
+
+                # TODO object_mask
+                # non_free_mask = (voxel_semantics_sparse != 17)
+                if 'loss_flow' in self.criterions.keys():
+                    flow_pred_i_sparse = flow_pred_i_sparse[valid_mask]  # [K, 2]
+                    flow_gt_sparse = flow_gt_sparse[valid_mask]
+
+                    # TODO loss
+                    # flow_loss_criterion = nn.MSELoss(size_average=None, reduce=None, reduction='mean')
+                    # loss_dict_i_b['loss_flow'] = flow_loss_criterion(flow_pred_i_sparse, flow_gt_sparse)
+                    loss_dict_i_b['loss_flow'] = self.criterions['loss_flow'](flow_pred_i_sparse, flow_gt_sparse)
+
 
                 if 'loss_geo_scal' in self.criterions.keys():
                     loss_dict_i_b['loss_geo_scal'] = self.criterions['loss_geo_scal'](seg_pred_i_sparse, voxel_semantics_sparse)  

@@ -8,7 +8,7 @@ from torch.cuda.amp import autocast
 from torch.autograd import Variable
 
 
-def get_voxel_decoder_loss_input(voxel_semantics, occ_loc_i, seg_pred_i, scale, num_classes=18):
+def get_voxel_decoder_loss_input(voxel_semantics, flow_gt, occ_loc_i, seg_pred_i, flow_pred_i, scale, num_classes=18):
     assert voxel_semantics.shape[0] == 1  # bs = 1
     voxel_semantics = voxel_semantics.long()
 
@@ -28,7 +28,20 @@ def get_voxel_decoder_loss_input(voxel_semantics, occ_loc_i, seg_pred_i, scale, 
         seg_pred_i_sparse = seg_pred_dense[sparse_mask]  # [K, CLS]
         voxel_semantics_sparse = voxel_semantics[sparse_mask]  # [K]
 
-    return seg_pred_i_sparse, voxel_semantics_sparse, sparse_mask
+    if flow_pred_i is not None:
+        flow_pred_dense, _ = sparse2dense(
+            occ_loc_i, flow_pred_i,
+            dense_shape=[200 // scale, 200 // scale, 16 // scale, 2],
+            empty_value=torch.zeros((2)).to(flow_pred_i)
+        )
+        flow_pred_dense = flow_pred_dense.permute(0, 4, 1, 2, 3)   # [B, 2, W, H, D]
+        flow_pred_dense = F.interpolate(flow_pred_dense, scale_factor=scale)
+        flow_pred_dense = flow_pred_dense.permute(0, 2, 3, 4, 1)   # [B, W, H, D, 2]
+
+        flow_pred_i_sparse = flow_pred_dense[sparse_mask]
+        flow_gt_sparse = flow_gt[sparse_mask]
+
+    return seg_pred_i_sparse, voxel_semantics_sparse, flow_pred_i_sparse, flow_gt_sparse, sparse_mask
 
 
 def compute_scal_loss(pred, gt, class_id, reverse=False, ignore_index=255):

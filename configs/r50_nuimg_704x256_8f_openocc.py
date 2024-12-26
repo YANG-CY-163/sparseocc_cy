@@ -15,16 +15,29 @@ occ_class_names = [
 ]
 
 _num_frames_ = 8
+_voxel_flow_ = True
 
 model = dict(
     pts_bbox_head=dict(
         class_names=occ_class_names,
         transformer=dict(
-            num_classes=len(occ_class_names)),
+            num_classes=len(occ_class_names),
+            voxel_flow=_voxel_flow_),
         loss_cfgs=dict(
             loss_mask2former=dict(
                 num_classes=len(occ_class_names)
             ),
+            loss_flow=dict(type='L1Loss', loss_weight=0.25),  # TODO loss weight
+            loss_geo_scal=dict(
+                type='GeoScalLoss',
+                num_classes=len(occ_class_names),
+                loss_weight=1.0
+            ),
+            loss_sem_scal=dict(
+                type='SemScalLoss',
+                num_classes=len(occ_class_names),
+                loss_weight=1.0
+            )
         ),
     ),
 )
@@ -44,7 +57,7 @@ train_pipeline = [
     dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=True),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
-    dict(type='Collect3D', keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids'],  # other keys: 'mask_camera'
+    dict(type='Collect3D', keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids', 'flow_gt'],  # other keys: 'mask_camera'
          meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'lidar2img', 'img_timestamp', 'ego2lidar'))
 ]
 
@@ -54,7 +67,7 @@ test_pipeline = [
     dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=False),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
-    dict(type='Collect3D', keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids'],
+    dict(type='Collect3D', keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids', 'flow_gt'],
          meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'lidar2img', 'img_timestamp', 'ego2lidar'))
 ]
 

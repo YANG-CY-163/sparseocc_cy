@@ -1,4 +1,5 @@
 import os
+import pdb
 import mmcv
 import torch
 import numpy as np
@@ -220,6 +221,7 @@ class LoadOccGTFromFile(object):
         results['voxel_semantics'] = semantics
         results['voxel_instances'] = final_instances
         results['instance_class_ids'] = DC(to_tensor(final_instance_class_ids))
+        results['flow_gt'] = occ_labels['flow']
 
         if results.get('rotate_bda', False):
             semantics = torch.from_numpy(semantics).permute(2, 0, 1)  # [16, 200, 200]

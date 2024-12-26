@@ -26,7 +26,8 @@ class SparseOccTransformer(BaseModule):
                  pc_range=None,
                  occ_size=None,
                  topk_training=None,
-                 topk_testing=None):
+                 topk_testing=None,
+                 voxel_flow=False):
         super().__init__()
         self.num_frames = num_frames
         
@@ -40,6 +41,7 @@ class SparseOccTransformer(BaseModule):
             num_classes=num_classes,
             pc_range=pc_range,
             semantic=True,
+            flow=voxel_flow,
             topk_training=topk_training,
             topk_testing=topk_testing
         )
@@ -122,7 +124,7 @@ class MaskFormerOccDecoder(BaseModule):
         self.decoder_layer.init_weights()
         
     def forward(self, occ_preds, mlvl_feats, img_metas):
-        occ_loc, occ_pred, _, mask_feat, _ = occ_preds[-1]
+        occ_loc, occ_pred, _, _, mask_feat, _ = occ_preds[-1]
         bs = mask_feat.shape[0]
         query_feat = self.query_feat.weight[None].repeat(bs, 1, 1)
         query_pos = self.query_pos.weight[None].repeat(bs, 1, 1)
@@ -188,7 +190,7 @@ class MaskFormerOccDecoderLayer(BaseModule):
             occ_pred: [bs, num_voxel]
             occ_loc: [bs, num_voxel, 3]
         """
-        occ_loc, occ_pred, _, mask_feat, _ = occ_preds[-1]
+        occ_loc, occ_pred, _, _, mask_feat, _ = occ_preds[-1]
         query_feat = self.norm1(self.self_attn(query_feat, query_pos=query_pos))
 
         sampled_feat = self.sampling(query_feat, valid_map, occ_loc, mlvl_feats, img_metas)

@@ -62,6 +62,7 @@ class SparseVoxelDecoder(BaseModule):
                  num_levels=None,
                  num_classes=None,
                  semantic=False,
+                 flow=False,
                  topk_training=None,
                  topk_testing=None,
                  pc_range=None):
@@ -72,6 +73,7 @@ class SparseVoxelDecoder(BaseModule):
         self.num_layers = num_layers
         self.pc_range = pc_range
         self.semantic = semantic
+        self.flow = flow
         self.voxel_dim = [200, 200, 16]
         self.topk_training = topk_training
         self.topk_testing = topk_testing
@@ -82,6 +84,9 @@ class SparseVoxelDecoder(BaseModule):
         
         if semantic:
             self.seg_pred_heads = nn.ModuleList()
+
+        if flow:
+            self.flow_pred_heads = nn.ModuleList()
 
         for i in range(num_layers):
             self.decoder_layers.append(SparseVoxelDecoderLayer(
@@ -101,6 +106,10 @@ class SparseVoxelDecoder(BaseModule):
 
             if semantic:
                 self.seg_pred_heads.append(nn.Linear(embed_dims, num_classes))
+
+            if flow:
+                self.flow_pred_heads.append(nn.Linear(embed_dims, 2))
+
 
     @torch.no_grad()
     def init_weights(self):
@@ -140,6 +149,11 @@ class SparseVoxelDecoder(BaseModule):
             else:
                 seg_pred_2x = None
 
+            if self.flow:
+                flow_pred_2x = self.flow_pred_heads[i](query_feat_2x)  # [B, K, 2]
+            else:
+                flow_pred_2x = None
+
             # sparsify after seg_pred
             non_free_prob = 1 - F.softmax(seg_pred_2x, dim=-1)[..., -1]  # [B, K]
             indices = torch.topk(non_free_prob, k=topk[i], dim=1)[1]  # [B, K]
@@ -147,11 +161,14 @@ class SparseVoxelDecoder(BaseModule):
             query_coord_2x = batch_indexing(query_coord_2x, indices, layout='channel_last')  # [B, K, 3]
             query_feat_2x = batch_indexing(query_feat_2x, indices, layout='channel_last')  # [B, K, C]
             seg_pred_2x = batch_indexing(seg_pred_2x, indices, layout='channel_last')  # [B, K, CLS]
+            flow_pred_2x = batch_indexing(flow_pred_2x, indices, layout='channel_last')  # [B, K, 2]
+
 
             occ_preds.append((
                 torch.div(query_coord_2x, interval // 2, rounding_mode='trunc').long(),
                 None,
                 seg_pred_2x,
+                flow_pred_2x,
                 query_feat_2x,
                 interval // 2)
             )
