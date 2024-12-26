@@ -15,7 +15,7 @@ from nuscenes.nuscenes import NuScenes
 
 VIZ = False
 
-dvr = load("dvr", sources=["local/lib/dvr/dvr.cpp", "local/lib/dvr/dvr.cu"], verbose=True, extra_cuda_cflags=['-allow-unsupported-compiler'])
+dvr = load("dvr", sources=["lib/dvr/dvr.cpp", "lib/dvr/dvr.cu"], verbose=True, extra_cuda_cflags=['-allow-unsupported-compiler'])
 
 _pc_range = [-40, -40, -1.0, 40, 40, 5.4]
 _voxel_size = 0.4
@@ -214,7 +214,7 @@ def process_one_sample(sem_pred, output_origin, output_points, output_labels, re
 
 
 def calc_metrics(pcd_pred_list, pcd_gt_list):
-    thresholds = [1, 2, 4]
+    thresholds = [0.1, 0.2, 0.4]
 
     gt_cnt = np.zeros([len(occ_class_names)])
     pred_cnt = np.zeros([len(occ_class_names)])

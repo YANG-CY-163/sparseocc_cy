@@ -8,12 +8,49 @@ from nuscenes.utils.geometry_utils import transform_matrix
 from nuscenes.utils.splits import train, val, test
 from nuscenes.utils.data_classes import LidarPointCloud
 
+'''
 import yaml
 
 yaml_path = './nuscenes_lidar_class.yaml'
 with open(yaml_path) as f:
     lidar_class_map = yaml.full_load(f)
 lidar_class_map = lidar_class_map['learning_map']
+'''
+
+lidar_class_map = {
+  1: 0,
+  5: 0,
+  7: 0,
+  8: 0,
+  10: 0,
+  11: 0,
+  13: 0,
+  19: 0,
+  20: 0,
+  0: 0,
+  29: 0,
+  31: 0,
+  9: 1,
+  14: 2,
+  15: 3,
+  16: 3,
+  17: 4,
+  18: 5,
+  21: 6,
+  2: 7,
+  3: 7,
+  4: 7,
+  6: 7,
+  12: 8,
+  22: 9,
+  23: 10,
+  24: 11,
+  25: 12,
+  26: 13,
+  27: 14,
+  28: 15,
+  30: 16
+}
 
 # https://github.com/tarashakhurana/4d-occ-forecasting/blob/ff986082cd6ea10e67ab7839bf0e654736b3f4e2/test_fgbg.py#L18C5-L18C18
 def get_grid_mask(points, pc_range):
@@ -48,7 +85,10 @@ class nuScenesDatasetLidar(Dataset):
         self.nusc_root = self.nusc.dataroot
         self.pred_dir = pred_dir
         self.gt_dir = gt_dir
-        self.gt_filepaths = sorted(glob.glob(os.path.join(self.gt_dir, '*/*/*.npz')))
+        if "eval" in self.gt_dir:
+            self.gt_filepaths = self.gt_dir
+        else:
+            self.gt_filepaths = sorted(glob.glob(os.path.join(self.gt_dir, '*/*/*.npz')))
         self.eval_pq = eval_pq
         #self.pc_range = [-40, -40, -1.0, 40, 40, 5.4]  # in ego system 
         self.pc_range = [-40, -40-0.9858, -1.0-1.8402, 40, 40-0.9858, 3]  # ego system - > lidar system
@@ -183,14 +223,18 @@ class nuScenesDatasetLidar(Dataset):
         output_points_tensor = torch.from_numpy(np.concatenate(output_points_list))  # [N, 3]
         output_labels_tensor = torch.from_numpy(np.concatenate(output_labels_list))  # [N]
 
-        pred_filepath = os.path.join(self.pred_dir, ref_sample_token + '.npz')
+        #pred_filepath = os.path.join(self.pred_dir, ref_sample_token + '.npz')
         
-        for gt_filepath in self.gt_filepaths:
-            if ref_sample_token in gt_filepath:
-                sem_pred = np.load(pred_filepath, allow_pickle=True)['gt']
-                sem_pred = np.reshape(sem_pred, [200, 200, 16])
-
-                break
+        if "eval" in self.gt_filepaths:
+            for gt_filepath in os.listdir(self.gt_filepaths):
+                if ref_sample_token in gt_filepath: 
+                    sem_pred = np.load(os.path.join(self.gt_filepaths, gt_filepath), allow_pickle=True)['gt'] # .files -> ['pred', 'gt']
+                    break
+        else:
+            for gt_filepath in self.gt_filepaths:
+                if ref_sample_token in gt_filepath: 
+                    sem_pred = np.load(gt_filepath, allow_pickle=True)['semantics'] # .files -> ['semantics', 'mask_lidar', 'mask_camera']
+                    break
 
         return (
                 ref_sample_token, 
