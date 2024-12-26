@@ -41,6 +41,8 @@ class SparseOccHead(nn.Module):
                  pc_range=None,
                  loss_cfgs=None,
                  panoptic=False,
+                 voxel_flow=False,
+                 instance_flow=False,
                  **kwargs):
         super(SparseOccHead, self).__init__()
         self.num_classes = len(class_names)
@@ -51,6 +53,9 @@ class SparseOccHead(nn.Module):
         self.score_threshold = 0.3
         self.overlap_threshold = 0.8
         self.panoptic = panoptic
+
+        self.voxel_flow = voxel_flow
+        self.instance_flow = instance_flow
 
         self.transformer = build_transformer(transformer)
         self.criterions = {k: build_loss(loss_cfg) for k, loss_cfg in loss_cfgs.items()}
@@ -68,12 +73,13 @@ class SparseOccHead(nn.Module):
 
     @auto_fp16(apply_to=('mlvl_feats'))
     def forward(self, mlvl_feats, img_metas):
-        occ_preds, mask_preds, class_preds = self.transformer(mlvl_feats, img_metas=img_metas)
+        occ_preds, mask_preds, class_preds, flow_preds = self.transformer(mlvl_feats, img_metas=img_metas)
         
         return {
             'occ_preds': occ_preds, 
             'mask_preds': mask_preds, 
-            'class_preds': class_preds
+            'class_preds': class_preds,
+            'flow_preds': flow_preds
         }
 
     @force_fp32(apply_to=('preds_dicts'))
@@ -97,7 +103,7 @@ class SparseOccHead(nn.Module):
                     flow_gt[b:b + 1],
                     occ_loc_i[b:b + 1],
                     seg_pred_i[b:b + 1] if seg_pred_i is not None else None,
-                    flow_pred_i[b:b + 1] if flow_pred_i is not None else None,
+                    flow_pred_i[b:b + 1] if self.voxel_flow else None,
                     scale,
                     self.num_classes
                 )
@@ -110,14 +116,14 @@ class SparseOccHead(nn.Module):
 
                 # TODO object_mask
                 # non_free_mask = (voxel_semantics_sparse != 17)
-                if 'loss_flow' in self.criterions.keys():
+                if self.voxel_flow:
                     flow_pred_i_sparse = flow_pred_i_sparse[valid_mask]  # [K, 2]
                     flow_gt_sparse = flow_gt_sparse[valid_mask]
 
                     # TODO loss
                     # flow_loss_criterion = nn.MSELoss(size_average=None, reduce=None, reduction='mean')
                     # loss_dict_i_b['loss_flow'] = flow_loss_criterion(flow_pred_i_sparse, flow_gt_sparse)
-                    loss_dict_i_b['loss_flow'] = self.criterions['loss_flow'](flow_pred_i_sparse, flow_gt_sparse)
+                    loss_dict_i_b['loss_voxel_flow'] = self.criterions['loss_flow'](flow_pred_i_sparse, flow_gt_sparse)
 
 
                 if 'loss_geo_scal' in self.criterions.keys():
@@ -140,6 +146,9 @@ class SparseOccHead(nn.Module):
         voxel_instances = voxel_instances[batch_idx.reshape(-1), occ_loc[..., 0], occ_loc[..., 1], occ_loc[..., 2]]
         voxel_instances = voxel_instances.reshape(B, -1)  # [B, N]
 
+        sparse_flow_gts = flow_gt[batch_idx.reshape(-1), occ_loc[..., 0], occ_loc[..., 1], occ_loc[..., 2]]
+        sparse_flow_gts = sparse_flow_gts.reshape(B, -1, 2)  # [B, N, 2]
+
         if mask_camera is not None:
             mask_camera = mask_camera[batch_idx.reshape(-1), occ_loc[..., 0], occ_loc[..., 1], occ_loc[..., 2]]
             mask_camera = mask_camera.reshape(B, -1)  # [B, N]
@@ -155,11 +164,20 @@ class SparseOccHead(nn.Module):
 
         for i, pred in enumerate(preds_dicts['mask_preds']):
             indices = self.matcher(pred, preds_dicts['class_preds'][i], voxel_instances, instance_class_ids, mask_camera)
-            loss_mask, loss_dice, loss_class = self.criterions['loss_mask2former'](
-                pred, preds_dicts['class_preds'][i], voxel_instances, instance_class_ids, indices, mask_camera)
+            loss_mask, loss_dice, loss_class, loss_instance_flow = self.criterions['loss_mask2former'](
+                pred, 
+                preds_dicts['class_preds'][i], 
+                preds_dicts['flow_preds'][i] if self.instance_flow else None,
+                voxel_instances, 
+                instance_class_ids, 
+                sparse_flow_gts, 
+                indices, 
+                mask_camera)
+
             loss_dict['loss_mask_{:d}'.format(i)] = loss_mask
             loss_dict['loss_dice_mask_{:d}'.format(i)] = loss_dice
             loss_dict['loss_class_{:d}'.format(i)] = loss_class
+            loss_dict['loss_instance_flow_{:d}'.format(i)] = loss_instance_flow
 
         return loss_dict
     

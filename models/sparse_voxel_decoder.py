@@ -161,7 +161,8 @@ class SparseVoxelDecoder(BaseModule):
             query_coord_2x = batch_indexing(query_coord_2x, indices, layout='channel_last')  # [B, K, 3]
             query_feat_2x = batch_indexing(query_feat_2x, indices, layout='channel_last')  # [B, K, C]
             seg_pred_2x = batch_indexing(seg_pred_2x, indices, layout='channel_last')  # [B, K, CLS]
-            flow_pred_2x = batch_indexing(flow_pred_2x, indices, layout='channel_last')  # [B, K, 2]
+            if flow_pred_2x is not None:
+                flow_pred_2x = batch_indexing(flow_pred_2x, indices, layout='channel_last')  # [B, K, 2]
 
 
             occ_preds.append((

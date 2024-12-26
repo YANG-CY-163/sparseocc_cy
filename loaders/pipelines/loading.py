@@ -218,11 +218,17 @@ class LoadOccGTFromFile(object):
                 instance_count += 1
                 final_instance_class_ids.append(class_id)
 
+        if 'flow' in occ_labels.keys():
+            flow_gt = occ_labels['flow']
+        else:
+            flow_gt = np.zeros_like(semantics, dtype=np.float32)
+
         results['voxel_semantics'] = semantics
         results['voxel_instances'] = final_instances
         results['instance_class_ids'] = DC(to_tensor(final_instance_class_ids))
-        results['flow_gt'] = occ_labels['flow']
+        results['flow_gt'] = flow_gt
 
+        # TODO check bda for flow
         if results.get('rotate_bda', False):
             semantics = torch.from_numpy(semantics).permute(2, 0, 1)  # [16, 200, 200]
             semantics = rotate(semantics, results['rotate_bda'], fill=255).permute(1, 2, 0)  # [200, 200, 16]
@@ -232,13 +238,23 @@ class LoadOccGTFromFile(object):
             final_instances = rotate(final_instances, results['rotate_bda'], fill=255).permute(1, 2, 0)  # [200, 200, 16]
             results['voxel_instances'] = final_instances.numpy()
 
+            flow_gt = torch.from_numpy(flow_gt).permute(3, 2, 0, 1)  # [H, W, D, 2] -> [2, D, H, W]
+            
+            flow_gt_x = rotate(flow_gt[0:1, ...], results['rotate_bda'], fill=0)
+            flow_gt_y = rotate(flow_gt[1:2, ...], results['rotate_bda'], fill=0)
+            flow_gt = torch.cat((flow_gt_x, flow_gt_y), dim=0)
+            flow_gt = flow_gt.permute(2, 3, 1, 0)  # [H, W, D, 2]
+            results['flow_gt'] = flow_gt.numpy()
+
         if results.get('flip_dx', False):
             results['voxel_semantics'] = results['voxel_semantics'][::-1, ...].copy()
             results['voxel_instances'] = results['voxel_instances'][::-1, ...].copy()
+            results['flow_gt'] = results['flow_gt'][::-1, ...].copy()
             
         if results.get('flip_dy', False):
             results['voxel_semantics'] = results['voxel_semantics'][:, ::-1, ...].copy()
             results['voxel_instances'] = results['voxel_instances'][:, ::-1, ...].copy()
+            results['flow_gt'] = results['flow_gt'][:, ::-1, ...].copy()
 
         return results
 

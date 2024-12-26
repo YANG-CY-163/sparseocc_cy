@@ -27,7 +27,8 @@ class SparseOccTransformer(BaseModule):
                  occ_size=None,
                  topk_training=None,
                  topk_testing=None,
-                 voxel_flow=False):
+                 voxel_flow=False,
+                 instance_flow=False):
         super().__init__()
         self.num_frames = num_frames
         
@@ -56,6 +57,7 @@ class SparseOccTransformer(BaseModule):
             num_classes=num_classes,
             pc_range=pc_range,
             occ_size=occ_size,
+            flow=instance_flow
         )
         
     @torch.no_grad()
@@ -81,9 +83,9 @@ class SparseOccTransformer(BaseModule):
         img_metas[0]['lidar2img'] = torch.matmul(lidar2img, ego2lidar)
 
         occ_preds = self.voxel_decoder(mlvl_feats, img_metas=img_metas)
-        mask_preds, class_preds = self.decoder(occ_preds, mlvl_feats, img_metas)
+        mask_preds, class_preds, flow_preds = self.decoder(occ_preds, mlvl_feats, img_metas)
         
-        return occ_preds, mask_preds, class_preds
+        return occ_preds, mask_preds, class_preds, flow_preds
 
 
 class MaskFormerOccDecoder(BaseModule):
@@ -97,12 +99,14 @@ class MaskFormerOccDecoder(BaseModule):
                  num_levels=None,
                  num_classes=None,
                  pc_range=None,
-                 occ_size=None):
+                 occ_size=None,
+                 flow=False):
         super().__init__()
 
         self.num_layers = num_layers
         self.num_queries = num_queries
         self.num_frames = num_frames
+        self.flow = flow
 
         self.decoder_layer = MaskFormerOccDecoderLayer(
             embed_dims=embed_dims,
@@ -114,6 +118,7 @@ class MaskFormerOccDecoder(BaseModule):
             num_classes=num_classes,
             pc_range=pc_range,
             occ_size=occ_size,
+            flow=flow
         )
         
         self.query_feat = nn.Embedding(num_queries, embed_dims)
@@ -129,20 +134,22 @@ class MaskFormerOccDecoder(BaseModule):
         query_feat = self.query_feat.weight[None].repeat(bs, 1, 1)
         query_pos = self.query_pos.weight[None].repeat(bs, 1, 1)
         
-        valid_map, mask_pred, class_pred = self.decoder_layer.pred_segmentation(query_feat, mask_feat)
+        valid_map, mask_pred, class_pred, flow_pred = self.decoder_layer.pred_segmentation(query_feat, mask_feat)
         
         class_preds = [class_pred]
         mask_preds = [mask_pred]
+        flow_preds = [flow_pred]
 
         for i in range(self.num_layers):
             DUMP.stage_count = i
-            query_feat, valid_map, mask_pred, class_pred = self.decoder_layer(
+            query_feat, valid_map, mask_pred, class_pred, flow_pred = self.decoder_layer(
                 query_feat, valid_map, mask_pred, occ_preds, mlvl_feats, query_pos, img_metas
             )
             mask_preds.append(mask_pred)
             class_preds.append(class_pred)
+            flow_preds.append(flow_pred)
 
-        return mask_preds, class_preds
+        return mask_preds, class_preds, flow_preds
 
 
 class MaskFormerOccDecoderLayer(BaseModule):
@@ -156,11 +163,13 @@ class MaskFormerOccDecoderLayer(BaseModule):
                  num_levels=None,
                  num_classes=None,
                  pc_range=None,
-                 occ_size=None):
+                 occ_size=None,
+                 flow=False):
         super().__init__()
         
         self.pc_range = pc_range
         self.occ_size = occ_size
+        self.flow = flow
         
         self.self_attn = MaskFormerSelfAttention(embed_dims, num_heads=8)
         self.sampling = MaskFormerSampling(embed_dims, num_frames, num_groups, num_points, num_levels, pc_range=pc_range, occ_size=occ_size)
@@ -168,6 +177,10 @@ class MaskFormerOccDecoderLayer(BaseModule):
         self.ffn = FFN(embed_dims, feedforward_channels=512, ffn_drop=0.1)
         self.mask_proj = nn.Linear(embed_dims, mask_dim)
         self.classifier = nn.Linear(embed_dims, num_classes - 1)
+        # FFN is used in sparsebev
+        if self.flow:
+            self.flow_head = nn.Linear(embed_dims, 2)
+
         
         self.norm1 = nn.LayerNorm(embed_dims)
         self.norm2 = nn.LayerNorm(embed_dims)
@@ -198,8 +211,8 @@ class MaskFormerOccDecoderLayer(BaseModule):
         
         query_feat = self.norm3(self.ffn(query_feat))
         
-        valid_map, mask_pred, class_pred = self.pred_segmentation(query_feat, mask_feat)
-        return query_feat, valid_map, mask_pred, class_pred
+        valid_map, mask_pred, class_pred, flow_pred = self.pred_segmentation(query_feat, mask_feat)
+        return query_feat, valid_map, mask_pred, class_pred, flow_pred
     
     def pred_segmentation(self, query_feat, mask_feat):
         if self.training and query_feat.requires_grad:
@@ -210,10 +223,16 @@ class MaskFormerOccDecoderLayer(BaseModule):
     def inner_pred_segmentation(self, query_feat, mask_feat):
         class_pred = self.classifier(query_feat)
         feat_proj = self.mask_proj(query_feat)
+
+        if self.flow:
+            flow_pred = self.flow_head(query_feat)
+        else:
+            flow_pred = None
+
         mask_pred = torch.einsum("bqc,bnc->bqn", feat_proj, mask_feat)
         valid_map = (mask_pred > 0.0)
         
-        return valid_map, mask_pred, class_pred
+        return valid_map, mask_pred, class_pred, flow_pred
 
 
 class MaskFormerSelfAttention(BaseModule):

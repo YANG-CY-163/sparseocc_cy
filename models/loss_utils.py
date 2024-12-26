@@ -28,6 +28,8 @@ def get_voxel_decoder_loss_input(voxel_semantics, flow_gt, occ_loc_i, seg_pred_i
         seg_pred_i_sparse = seg_pred_dense[sparse_mask]  # [K, CLS]
         voxel_semantics_sparse = voxel_semantics[sparse_mask]  # [K]
 
+    flow_pred_i_sparse = None
+    flow_gt_sparse = None
     if flow_pred_i is not None:
         flow_pred_dense, _ = sparse2dense(
             occ_loc_i, flow_pred_i,
@@ -327,13 +329,19 @@ class Mask2FormerLoss(nn.Module):
                  loss_cls_weight=1.0, 
                  loss_mask_weight=1.0, 
                  loss_dice_weight=1.0, 
-                 no_class_weight=0.1):
+                 no_class_weight=0.1,
+                 loss_flow_cfg=None,
+                 flow=False):
         super().__init__()
         self.num_classes = num_classes
         self.loss_cls_weight = loss_cls_weight
         self.loss_mask_weight = loss_mask_weight
         self.loss_dice_weight = loss_dice_weight
         self.no_class_weight = no_class_weight
+
+        self.loss_flow = build_loss(loss_flow_cfg)
+        self.flow = flow
+
         self.empty_weight = torch.ones(self.num_classes)
         self.empty_weight[-1] = self.no_class_weight
         self.loss_cls = build_loss(dict(
@@ -344,11 +352,12 @@ class Mask2FormerLoss(nn.Module):
             loss_weight=2.0
         ))
         
-    def forward(self, mask_pred, class_pred, mask_gt, class_gt, indices, mask_camera):
+    def forward(self, mask_pred, class_pred, flow_pred, mask_gt, class_gt, flow_gt, indices, mask_camera):
         bs = mask_pred.shape[0]
         loss_masks = torch.tensor(0).to(mask_pred)
         loss_dices = torch.tensor(0).to(mask_pred)
         loss_classes = torch.tensor(0).to(mask_pred)
+        loss_flows = torch.tensor(0).to(mask_pred)
 
         num_total_pos = sum([tc.numel() for tc in class_gt])
         avg_factor = torch.clamp(reduce_mean(class_pred.new_tensor([num_total_pos * 1.0])), min=1).item()
@@ -358,6 +367,17 @@ class Mask2FormerLoss(nn.Module):
             tgt_mask = mask_gt[b]
             num_instances = class_gt[b].shape[0]
 
+            # get speed for each instance by averaging all voxels' speed
+            instance_masks = torch.arange(num_instances).to(tgt_mask.device)[:, None] == tgt_mask[None]
+            # TODO CHECK
+            # num_voxels_per_instance = instance_masks.sum(dim=-1)
+            # it won't trigger a bug without clamp, as we've already dropped void instances
+            # for safety, we still add it
+            num_voxels_per_instance = torch.clamp(instance_masks.sum(dim=-1), min=1)
+
+            instace_gt_flow_per_voxel = flow_gt[b][None] * instance_masks[..., None]
+            tgt_flow = instace_gt_flow_per_voxel.sum(dim=-2) / num_voxels_per_instance[:, None]
+
             tgt_class = class_gt[b]
             tgt_mask = (tgt_mask.unsqueeze(-1) == torch.arange(num_instances).to(mask_gt.device))
             tgt_mask = tgt_mask.permute(1, 0)
@@ -366,6 +386,8 @@ class Mask2FormerLoss(nn.Module):
             src_mask = mask_pred[b][src_idx]   # [M, N], M is number of gt instances, N is number of remaining voxels
             tgt_mask = tgt_mask[tgt_idx]   # [M, N]
             src_class = class_pred[b]   # [Q, CLS]
+            if self.flow:
+                src_flow = flow_pred[b][src_idx]  # [M, 2]
             
             # pad non-aligned queries' tgt classes with 'no class'
             pad_tgt_class = torch.full(
@@ -377,12 +399,18 @@ class Mask2FormerLoss(nn.Module):
             loss_mask, loss_dice = self.loss_masks(src_mask, tgt_mask, avg_factor=avg_factor, mask_camera=mask_camera_b)
             # calculates loss class for all queries
             loss_class = self.loss_labels(src_class, pad_tgt_class, self.empty_weight.to(src_class.device), avg_factor=avg_factor)
+            # only calculates loss flow for aligned pairs
+            if self.flow:
+                loss_flow = self.loss_flow(src_flow, tgt_flow)
+            else:
+                loss_flow = 0
             
             loss_masks += loss_mask * self.loss_mask_weight
             loss_dices += loss_dice * self.loss_dice_weight
             loss_classes += loss_class * self.loss_cls_weight
+            loss_flows += loss_flow
             
-        return loss_masks, loss_dices, loss_classes
+        return loss_masks, loss_dices, loss_classes, loss_flows
     
     # mask2former use point sampling to calculate loss of fewer important points
     # we omit point sampling as we have limited number of points

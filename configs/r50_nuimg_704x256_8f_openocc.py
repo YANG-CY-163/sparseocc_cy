@@ -16,16 +16,22 @@ occ_class_names = [
 
 _num_frames_ = 8
 _voxel_flow_ = True
+_instance_flow_ = False
 
 model = dict(
     pts_bbox_head=dict(
         class_names=occ_class_names,
+        voxel_flow=_voxel_flow_,
+        instance_flow=_instance_flow_,
         transformer=dict(
             num_classes=len(occ_class_names),
-            voxel_flow=_voxel_flow_),
+            voxel_flow=_voxel_flow_,
+            instance_flow=_instance_flow_),
         loss_cfgs=dict(
             loss_mask2former=dict(
-                num_classes=len(occ_class_names)
+                num_classes=len(occ_class_names),
+                loss_flow_cfg=dict(type='L1Loss', loss_weight=0.25),
+                flow=_instance_flow_
             ),
             loss_flow=dict(type='L1Loss', loss_weight=0.25),  # TODO loss weight
             loss_geo_scal=dict(
