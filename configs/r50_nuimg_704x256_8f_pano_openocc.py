@@ -1,7 +1,8 @@
-_base_ = ['./r50_nuimg_704x256_8f.py']
+_base_ = ['./r50_nuimg_704x256_8f_openocc.py']
 
 occ_gt_root = 'data/nuscenes/openocc_v2'
 
+# For nuScenes we usually do 10-class detection
 det_class_names = [
     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
@@ -15,11 +16,12 @@ occ_class_names = [
 ]
 
 _num_frames_ = 8
-_voxel_flow_ = True
-_instance_flow_ = False
+_voxel_flow_ = False
+_instance_flow_ = True
 
 model = dict(
     pts_bbox_head=dict(
+        panoptic=True,
         class_names=occ_class_names,
         voxel_flow=_voxel_flow_,
         instance_flow=_instance_flow_,
@@ -45,7 +47,7 @@ model = dict(
                 loss_weight=1.0
             )
         ),
-    ),
+    )
 )
 
 ida_aug_conf = {
@@ -67,7 +69,8 @@ bda_aug_conf = dict(
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1),
-    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, classes=det_class_names, is_train=True),
+    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names), inst_class_ids=[0, 1, 2, 3, 4, 5, 6, 7]),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=True),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
     dict(type='Collect3D', keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids', 'flow_gt'],  # other keys: 'mask_camera'
@@ -77,7 +80,8 @@ train_pipeline = [
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1, test_mode=True),
-    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, classes=det_class_names, is_train=False),
+    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names), inst_class_ids=[0, 1, 2, 3, 4, 5, 6, 7]),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=False),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
     dict(type='Collect3D', keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids', 'flow_gt'],
