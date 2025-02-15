@@ -227,7 +227,7 @@ class MaskFormerOccDecoderLayer(BaseModule):
         if self.flow:
             flow_pred = self.flow_head(query_feat)
         else:
-            flow_pred = None
+            flow_pred = torch.zeros([query_feat.shape[0], query_feat.shape[1], 2])
 
         mask_pred = torch.einsum("bqc,bnc->bqn", feat_proj, mask_feat)
         valid_map = (mask_pred > 0.0)

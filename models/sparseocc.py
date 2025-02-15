@@ -132,6 +132,7 @@ class SparseOcc(MVXTwoStageDetector):
 
         sem_pred = output['sem_pred'].cpu().numpy().astype(np.uint8)
         occ_loc = output['occ_loc'].cpu().numpy().astype(np.uint8)
+        flow_pred = output['flow_pred'].cpu().numpy().astype(np.float32)
 
         batch_size = sem_pred.shape[0]
 
@@ -144,12 +145,14 @@ class SparseOcc(MVXTwoStageDetector):
                 'sem_pred': sem_pred[b:b+1],
                 'pano_inst': pano_inst[b:b+1],
                 'pano_sem': pano_sem[b:b+1],
-                'occ_loc': occ_loc[b:b+1]
+                'occ_loc': occ_loc[b:b+1],
+                'flow_pred': flow_pred[b:b+1]
             } for b in range(batch_size)]
         else:
             return [{
                 'sem_pred': sem_pred[b:b+1],
-                'occ_loc': occ_loc[b:b+1]
+                'occ_loc': occ_loc[b:b+1],
+                'flow_pred': flow_pred[b:b+1]
             } for b in range(batch_size)]
 
     def simple_test_pts(self, x, img_metas, rescale=False):

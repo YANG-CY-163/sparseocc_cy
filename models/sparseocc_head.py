@@ -189,11 +189,16 @@ class SparseOccHead(nn.Module):
         sem_pred = self.merge_semseg(mask_cls, mask_pred)  # [B, C, N]
         outs['sem_pred'] = sem_pred
         outs['occ_loc'] = occ_indices
+        outs['flow_pred'] = outs['occ_preds'][-1][3]
 
         if self.panoptic:
             pano_inst, pano_sem = self.merge_panoseg(mask_cls, mask_pred)  # [B, C, N]
             outs['pano_inst'] = pano_inst
             outs['pano_sem'] = pano_sem
+
+            # TODO
+            # if self.instance_flow:
+            #     outs['flow_pred'] = self.merge
         
         return outs
     

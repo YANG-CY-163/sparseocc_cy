@@ -116,7 +116,7 @@ class NuSceneOcc(NuScenesDataset):
         return input_dict
 
     def evaluate(self, occ_results, runner=None, show_dir=None, **eval_kwargs):
-        occ_gts, occ_preds, inst_gts, inst_preds, lidar_origins = [], [], [], [], []
+        occ_gts, occ_preds, inst_gts, inst_preds, flow_gts, flow_preds, lidar_origins = [], [], [], [], [], [], []
         print('\nStarting Evaluation...')
 
         sample_tokens = [info['token'] for info in self.data_infos]
@@ -163,16 +163,26 @@ class NuSceneOcc(NuScenesDataset):
                 inst_gts.append(gt_instances)
                 inst_preds.append(pano_inst)
 
+            if 'flow_pred' in occ_pred.keys():
+                flow_pred = torch.from_numpy(occ_pred['flow_pred'])
+                flow_pred, _ = sparse2dense(occ_loc, flow_pred, dense_shape=occ_size+[2], empty_value=torch.zeros((2)))
+                flow_pred = flow_pred.squeeze(0).numpy()
+
+                flow_gt = occ_gt['flow']
+                flow_gts.append(flow_gt)
+                flow_preds.append(flow_pred)
+
             lidar_origins.append(output_origin)
             occ_gts.append(gt_semantics)
             occ_preds.append(sem_pred)
         
+        eval_flow = len(flow_preds) > 0
         if len(inst_preds) > 0:
             results = main_raypq(occ_preds, occ_gts, inst_preds, inst_gts, lidar_origins, occ_class_names=occ_class_names)
-            results.update(main_rayiou(occ_preds, occ_gts, lidar_origins, occ_class_names=occ_class_names))
+            results.update(main_rayiou(occ_preds, occ_gts, flow_preds, flow_gts, lidar_origins, occ_class_names=occ_class_names, eval_flow=eval_flow))
             return results
         else:
-            return main_rayiou(occ_preds, occ_gts, lidar_origins, occ_class_names=occ_class_names)
+            return main_rayiou(occ_preds, occ_gts, flow_preds, flow_gts, lidar_origins, occ_class_names=occ_class_names, eval_flow=eval_flow)
 
     def format_results(self, occ_results, submission_prefix, **kwargs):
         if submission_prefix is not None:

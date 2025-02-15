@@ -152,7 +152,7 @@ class SparseVoxelDecoder(BaseModule):
             if self.flow:
                 flow_pred_2x = self.flow_pred_heads[i](query_feat_2x)  # [B, K, 2]
             else:
-                flow_pred_2x = None
+                flow_pred_2x = torch.zeros([seg_pred_2x.shape[0], seg_pred_2x.shape[1], 2])
 
             # sparsify after seg_pred
             non_free_prob = 1 - F.softmax(seg_pred_2x, dim=-1)[..., -1]  # [B, K]
