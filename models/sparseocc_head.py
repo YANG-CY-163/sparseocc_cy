@@ -189,16 +189,19 @@ class SparseOccHead(nn.Module):
         sem_pred = self.merge_semseg(mask_cls, mask_pred)  # [B, C, N]
         outs['sem_pred'] = sem_pred
         outs['occ_loc'] = occ_indices
-        outs['flow_pred'] = outs['occ_preds'][-1][3]
+        outs['flow_pred'] = outs['occ_preds'][-1][3]  # [B, K, 2]
 
         if self.panoptic:
-            pano_inst, pano_sem = self.merge_panoseg(mask_cls, mask_pred)  # [B, C, N]
+            if self.instance_flow:
+                # Handle instance-level flow predictions
+                flow_pred = outs['flow_preds'][-1]  # [B, Q, 2]
+                pano_inst, pano_sem, instance_flow = self.merge_panoseg(mask_cls, mask_pred, flow_pred)
+                outs['flow_pred'] = instance_flow
+            else:
+                pano_inst, pano_sem = self.merge_panoseg(mask_cls, mask_pred)
+            
             outs['pano_inst'] = pano_inst
             outs['pano_sem'] = pano_sem
-
-            # TODO
-            # if self.instance_flow:
-            #     outs['flow_pred'] = self.merge
         
         return outs
     
@@ -215,23 +218,36 @@ class SparseOccHead(nn.Module):
         cls_id[cls_score < 0.01] = self.num_classes - 1
         return cls_id  # [B, N]
     
-    def merge_panoseg(self, mask_cls, mask_pred):
+    def merge_panoseg(self, mask_cls, mask_pred, flow_pred=None):
         pano_inst, pano_sem = [], []
+        instance_flows = []
+        
         for b in range(mask_cls.shape[0]):
-            pano_inst_b, pano_sem_b = self.merge_panoseg_single(
-                mask_cls[b:b + 1],
-                mask_pred[b:b + 1]
-            )
+            if flow_pred is not None:
+                pano_inst_b, pano_sem_b, flow_b = self.merge_panoseg_single(
+                    mask_cls[b:b+1],
+                    mask_pred[b:b+1],
+                    flow_pred[b:b+1]
+                )
+                instance_flows.append(flow_b)
+            else:
+                pano_inst_b, pano_sem_b = self.merge_panoseg_single(
+                    mask_cls[b:b+1],
+                    mask_pred[b:b+1]
+                )
             pano_inst.append(pano_inst_b)
             pano_sem.append(pano_sem_b)
         
         pano_inst = torch.cat(pano_inst, dim=0)
         pano_sem = torch.cat(pano_sem, dim=0)
         
+        if flow_pred is not None:
+            instance_flows = torch.cat(instance_flows, dim=0)
+            return pano_inst, pano_sem, instance_flows
+        
         return pano_inst, pano_sem
 
-    # https://github.com/facebookresearch/Mask2Former/blob/main/mask2former/maskformer_model.py#L286
-    def merge_panoseg_single(self, mask_cls, mask_pred):
+    def merge_panoseg_single(self, mask_cls, mask_pred, flow_pred=None):
         assert mask_cls.shape[0] == 1, "bs != 1"
         scores, labels = mask_cls.max(-1)
         
@@ -240,12 +256,18 @@ class SparseOccHead(nn.Module):
         cur_scores = scores[keep]
         cur_classes = labels[keep]
         cur_masks = mask_pred[keep]
+        if flow_pred is not None:
+            cur_flows = flow_pred[keep]  # [K, 2]
 
         cur_prob_masks = cur_scores.view(-1, 1) * cur_masks
 
         N = cur_masks.shape[-1]
         instance_seg = torch.zeros((N), dtype=torch.int32, device=cur_masks.device)
         semantic_seg = torch.ones((N), dtype=torch.int32, device=cur_masks.device) * (self.num_classes - 1)
+        
+        if flow_pred is not None:
+            # Initialize flow prediction tensor with zeros
+            flow_seg = torch.zeros((N, 2), dtype=flow_pred.dtype, device=flow_pred.device)
         
         current_segment_id = 0
         stuff_memory_list = {self.num_classes - 1: 0}
@@ -282,8 +304,16 @@ class SparseOccHead(nn.Module):
                     current_segment_id += 1
                     instance_seg[mask] = current_segment_id
                     semantic_seg[mask] = pred_class
-        
+                    
+                    # assign flow predictions for this instance
+                    if flow_pred is not None:
+                        flow_seg[mask] = cur_flows[k]
+
         instance_seg = instance_seg.unsqueeze(0)
         semantic_seg = semantic_seg.unsqueeze(0)
         
-        return instance_seg, semantic_seg  # [B, N]
+        if flow_pred is not None:
+            flow_seg = flow_seg.unsqueeze(0)
+            return instance_seg, semantic_seg, flow_seg
+            
+        return instance_seg, semantic_seg
