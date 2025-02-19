@@ -1,5 +1,6 @@
 import os
 import cv2
+from matplotlib import pyplot as plt
 import utils
 import logging
 import argparse
@@ -16,6 +17,7 @@ from configs.r50_nuimg_704x256_8f import occ_class_names
 from mmcv.parallel import MMDataParallel
 from mmcv.runner import load_checkpoint
 from mmdet3d.models import build_model
+from matplotlib.colors import hsv_to_rgb
 
 
 color_map = np.array([
@@ -38,6 +40,47 @@ color_map = np.array([
     [0, 175, 0, 255],  # vegetation           green
     [255, 255, 255, 255],  # free             white
 ], dtype=np.uint8)
+
+def visualize_flow(flow, arrow_interval=5, arrow_width=0.005, arrow_headwidth=3, arrow_headlength=5):
+    """
+    params: flow (np.ndarray): ÐÎ×´Îª (height, width, 2) 
+
+    """
+    magnitude = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+    angle = np.arctan2(flow[..., 1], flow[..., 0])
+    
+    # convert to [0, 2*pi]
+    angle = (angle + 2 * np.pi) % (2 * np.pi)
+    hue = angle / (2 * np.pi)
+
+    max_magnitude = np.max(magnitude)
+    saturation = magnitude / max_magnitude
+    value = np.ones_like(saturation)
+
+    hsv = np.dstack((hue, saturation, value))
+    rgb = hsv_to_rgb(hsv)
+
+    fig, ax = plt.subplots()
+    ax.imshow(rgb)
+
+
+    height, width = flow.shape[:2]
+    x, y = np.meshgrid(np.arange(width), np.arange(height))
+
+    mask = magnitude > 0
+    # interval sample
+    sampled_mask = mask[::arrow_interval, ::arrow_interval]
+    sampled_x = x[::arrow_interval, ::arrow_interval][sampled_mask]
+    sampled_y = y[::arrow_interval, ::arrow_interval][sampled_mask]
+    sampled_u = flow[::arrow_interval, ::arrow_interval, 0][sampled_mask]
+    sampled_v = flow[::arrow_interval, ::arrow_interval, 1][sampled_mask]
+
+    # draw arrows
+    ax.quiver(sampled_x, sampled_y, sampled_u, sampled_v, color='black', scale_units='xy', scale=0.1,
+              width=arrow_width, headwidth=arrow_headwidth, headlength=arrow_headlength)
+
+    ax.axis('off')
+    plt.savefig('flow.png')
 
 def occ2img(semantics):
     H, W, D = semantics.shape
