@@ -240,21 +240,37 @@ class LoadOccGTFromFile(object):
 
             flow_gt = torch.from_numpy(flow_gt).permute(3, 2, 0, 1)  # [H, W, D, 2] -> [2, D, H, W]
             
+            # Rotate flow components using rotation matrix
+            angle_rad = results['rotate_bda'] * np.pi / 180
+            cos_theta = np.cos(angle_rad)
+            sin_theta = np.sin(angle_rad)
+            
             flow_gt_x = rotate(flow_gt[0:1, ...], results['rotate_bda'], fill=0)
             flow_gt_y = rotate(flow_gt[1:2, ...], results['rotate_bda'], fill=0)
-            flow_gt = torch.cat((flow_gt_x, flow_gt_y), dim=0)
+            
+            # Transform flow vector components
+            flow_gt_rotated_x = flow_gt_x * cos_theta - flow_gt_y * sin_theta
+            flow_gt_rotated_y = flow_gt_x * sin_theta + flow_gt_y * cos_theta
+            
+            flow_gt = torch.cat((flow_gt_rotated_x, flow_gt_rotated_y), dim=0)
             flow_gt = flow_gt.permute(2, 3, 1, 0)  # [H, W, D, 2]
             results['flow_gt'] = flow_gt.numpy()
 
         if results.get('flip_dx', False):
             results['voxel_semantics'] = results['voxel_semantics'][::-1, ...].copy()
             results['voxel_instances'] = results['voxel_instances'][::-1, ...].copy()
-            results['flow_gt'] = results['flow_gt'][::-1, ...].copy()
+            flow_gt = results['flow_gt'][::-1, ...].copy()
+            # Flip x direction flow
+            flow_gt[..., 0] = -flow_gt[..., 0]
+            results['flow_gt'] = flow_gt
             
         if results.get('flip_dy', False):
             results['voxel_semantics'] = results['voxel_semantics'][:, ::-1, ...].copy()
             results['voxel_instances'] = results['voxel_instances'][:, ::-1, ...].copy()
-            results['flow_gt'] = results['flow_gt'][:, ::-1, ...].copy()
+            flow_gt = results['flow_gt'][:, ::-1, ...].copy()
+            # Flip y direction flow
+            flow_gt[..., 1] = -flow_gt[..., 1]
+            results['flow_gt'] = flow_gt
 
         return results
 
