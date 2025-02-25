@@ -29,11 +29,12 @@ model = dict(
             instance_flow=_instance_flow_),
         loss_cfgs=dict(
             loss_mask2former=dict(
+                class_names=occ_class_names,
                 num_classes=len(occ_class_names),
-                loss_flow_cfg=dict(type='L1Loss', loss_weight=0.25),
+                loss_flow_cfg=dict(type='L1Loss', loss_weight=1.0),
                 flow=_instance_flow_
             ),
-            loss_flow=dict(type='L1Loss', loss_weight=0.25),  # TODO loss weight
+            loss_flow=dict(type='L1Loss', loss_weight=1.0),  # TODO loss weight
             loss_geo_scal=dict(
                 type='GeoScalLoss',
                 num_classes=len(occ_class_names),
@@ -67,6 +68,7 @@ bda_aug_conf = dict(
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, classes=det_class_names, is_train=True),
     dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=True),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
@@ -77,6 +79,7 @@ train_pipeline = [
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1, test_mode=True),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, classes=det_class_names, is_train=False),
     dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=False),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),

@@ -31,11 +31,12 @@ model = dict(
             instance_flow=_instance_flow_),
         loss_cfgs=dict(
             loss_mask2former=dict(
+                class_names=occ_class_names,
                 num_classes=len(occ_class_names),
-                loss_flow_cfg=dict(type='L1Loss', loss_weight=0.25),
+                loss_flow_cfg=dict(type='L1Loss', loss_weight=1.0),
                 flow=_instance_flow_
             ),
-            loss_flow=dict(type='L1Loss', loss_weight=0.25),  # TODO loss weight
+            loss_flow=dict(type='L1Loss', loss_weight=1.0),  # TODO loss weight
             loss_geo_scal=dict(
                 type='GeoScalLoss',
                 num_classes=len(occ_class_names),

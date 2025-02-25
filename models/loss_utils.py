@@ -326,9 +326,11 @@ def flatten_probas(probas, labels, ignore=None):
 class Mask2FormerLoss(nn.Module):
     def __init__(self, 
                  num_classes,
+                 class_names,
                  loss_cls_weight=1.0, 
                  loss_mask_weight=1.0, 
-                 loss_dice_weight=1.0, 
+                 loss_dice_weight=1.0,
+                 loss_flow_weight=0.5,
                  no_class_weight=0.1,
                  loss_flow_cfg=None,
                  flow=False):
@@ -337,10 +339,13 @@ class Mask2FormerLoss(nn.Module):
         self.loss_cls_weight = loss_cls_weight
         self.loss_mask_weight = loss_mask_weight
         self.loss_dice_weight = loss_dice_weight
+        self.loss_flow_weight = loss_flow_weight
         self.no_class_weight = no_class_weight
 
-        self.loss_flow = build_loss(loss_flow_cfg)
+        #self.loss_flow = build_loss(loss_flow_cfg)
+        self.loss_flow = FlowLoss()
         self.flow = flow
+        self.class_names = class_names
 
         self.empty_weight = torch.ones(self.num_classes)
         self.empty_weight[-1] = self.no_class_weight
@@ -351,6 +356,12 @@ class Mask2FormerLoss(nn.Module):
             alpha=0.25,
             loss_weight=2.0
         ))
+        
+        # Define foreground (moving) classes 
+        self.moving_classes = [
+            'car', 'truck', 'construction_vehicle', 'bus',
+            'trailer', 'motorcycle', 'bicycle', 'pedestrian'
+        ]
         
     def forward(self, mask_pred, class_pred, flow_pred, mask_gt, class_gt, flow_gt, indices, mask_camera):
         bs = mask_pred.shape[0]
@@ -386,8 +397,23 @@ class Mask2FormerLoss(nn.Module):
             src_mask = mask_pred[b][src_idx]   # [M, N], M is number of gt instances, N is number of remaining voxels
             tgt_mask = tgt_mask[tgt_idx]   # [M, N]
             src_class = class_pred[b]   # [Q, CLS]
+
+            loss_flow = torch.tensor(0.0, device=mask_pred.device)
             if self.flow:
                 src_flow = flow_pred[b][src_idx]  # [M, 2]
+                tgt_flow = tgt_flow[tgt_idx]  # [M, 2]
+
+                # NOTE Create mask for moving objects based on class
+                moving_mask = torch.tensor([
+                    self.class_names[c] in self.moving_classes 
+                    for c in tgt_class[tgt_idx]
+                ], device=src_flow.device)
+                
+                if moving_mask.any():
+                    # Only compute flow loss on moving objects
+                    src_flow = src_flow[moving_mask]
+                    tgt_flow = tgt_flow[moving_mask]
+                    loss_flow = self.loss_flow(src_flow, tgt_flow)
             
             # pad non-aligned queries' tgt classes with 'no class'
             pad_tgt_class = torch.full(
@@ -400,15 +426,15 @@ class Mask2FormerLoss(nn.Module):
             # calculates loss class for all queries
             loss_class = self.loss_labels(src_class, pad_tgt_class, self.empty_weight.to(src_class.device), avg_factor=avg_factor)
             # only calculates loss flow for aligned pairs
-            if self.flow:
-                loss_flow = self.loss_flow(src_flow, tgt_flow)
-            else:
-                loss_flow = 0
+            # if self.flow:
+            #     loss_flow = self.loss_flow(src_flow, tgt_flow)
+            # else:
+            #     loss_flow = 0
             
             loss_masks += loss_mask * self.loss_mask_weight
             loss_dices += loss_dice * self.loss_dice_weight
             loss_classes += loss_class * self.loss_cls_weight
-            loss_flows += loss_flow
+            loss_flows += loss_flow * self.loss_flow_weight
             
         return loss_masks, loss_dices, loss_classes, loss_flows
     
@@ -462,3 +488,28 @@ def mean(l, empty=0):
         return acc
     
     return acc / n
+
+
+class FlowLoss(nn.Module):
+    def __init__(self, beta=0.2):
+        super().__init__()
+        self.beta = beta  # weight factor for speed-based weighting
+        
+    def forward(self, pred_flow, gt_flow):
+        """
+        Args:
+            pred_flow: [N, 2] predicted flow
+            gt_flow: [N, 2] ground truth flow
+        Returns:
+            weighted L1 loss
+        """
+        # Calculate flow magnitude as weights
+        flow_magnitude = torch.norm(gt_flow, dim=-1)  # [N]
+        # Normalize weights to [0,1] range
+        weights = 1 + self.beta * (flow_magnitude / flow_magnitude.max())
+        
+        # L1 loss with weights
+        loss = F.l1_loss(pred_flow, gt_flow, reduction='none')  # [N, 2]
+        weighted_loss = (weights.unsqueeze(-1) * loss).mean()
+        
+        return weighted_loss
