@@ -60,7 +60,7 @@ class SparseOccHead(nn.Module):
         self.transformer = build_transformer(transformer)
         self.criterions = {k: build_loss(loss_cfg) for k, loss_cfg in loss_cfgs.items()}
         self.matcher = HungarianMatcher(cost_class=2.0, cost_mask=5.0, cost_dice=5.0)
-        self.loss_flow = FlowLoss(beta=5)
+        self.loss_flow = FlowLoss()
 
        
         # TODO freq for openocc_v2
@@ -117,27 +117,28 @@ class SparseOccHead(nn.Module):
 
                 # TODO object_mask
                 # non_free_mask = (voxel_semantics_sparse != 17)
-                # if self.voxel_flow:
-                #     flow_pred_i_sparse = flow_pred_i_sparse[valid_mask]  # [K, 2]
-                #     flow_gt_sparse = flow_gt_sparse[valid_mask]
+                if self.voxel_flow:
+                    flow_pred_i_sparse = flow_pred_i_sparse[valid_mask]  # [K, 2]
+                    flow_gt_sparse = flow_gt_sparse[valid_mask]
 
-                    # TODO loss
                     # flow_loss_criterion = nn.MSELoss(size_average=None, reduce=None, reduction='mean')
                     # loss_dict_i_b['loss_flow'] = flow_loss_criterion(flow_pred_i_sparse, flow_gt_sparse)
                     #loss_dict_i_b['loss_voxel_flow'] = self.criterions['loss_flow'](flow_pred_i_sparse, flow_gt_sparse)
+                    loss_dict_i_b['loss_voxel_flow'] = self.loss_flow(flow_pred_i_sparse, flow_gt_sparse)
 
-                if self.voxel_flow:
-                    # Get valid flow mask (non-zero flow)
-                    valid_flow_mask = torch.norm(flow_gt_sparse, dim=-1) > 0
+                # if self.voxel_flow:
+                #     # Get valid flow mask (non-zero flow)
+                #     # TODO: cause mismatch between collectives on ranks
+                #     valid_flow_mask = torch.norm(flow_gt_sparse, dim=-1) > 0
                     
-                    # Calculate flow loss only on valid flow regions
-                    flow_pred_valid = flow_pred_i_sparse[valid_flow_mask]
-                    flow_gt_valid = flow_gt_sparse[valid_flow_mask]
+                #     # Calculate flow loss only on valid flow regions
+                #     flow_pred_valid = flow_pred_i_sparse[valid_flow_mask]
+                #     flow_gt_valid = flow_gt_sparse[valid_flow_mask]
                     
-                    if valid_flow_mask.sum() > 0:
-                        loss_dict_i_b['loss_voxel_flow'] = self.loss_flow(flow_pred_valid, flow_gt_valid)
-                    else:
-                        loss_dict_i_b['loss_voxel_flow'] = torch.tensor(0.0).to(flow_pred_i_sparse.device)
+                #     if valid_flow_mask.sum() > 0:
+                #         loss_dict_i_b['loss_voxel_flow'] = self.loss_flow(flow_pred_valid, flow_gt_valid)
+                #     else:
+                #         loss_dict_i_b['loss_voxel_flow'] = torch.tensor(0.0).to(flow_pred_i_sparse.device)
 
                 if 'loss_geo_scal' in self.criterions.keys():
                     loss_dict_i_b['loss_geo_scal'] = self.criterions['loss_geo_scal'](seg_pred_i_sparse, voxel_semantics_sparse)  
