@@ -108,7 +108,13 @@ class SparseVoxelDecoder(BaseModule):
                 self.seg_pred_heads.append(nn.Linear(embed_dims, num_classes))
 
             if flow:
-                self.flow_pred_heads.append(nn.Linear(embed_dims, 2))
+                self.flow_pred_heads.append(nn.Sequential(
+                    nn.Linear(embed_dims, 128),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(128, 64),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(64, 2)
+                ))
 
 
     @torch.no_grad()
@@ -152,7 +158,7 @@ class SparseVoxelDecoder(BaseModule):
             if self.flow:
                 flow_pred_2x = self.flow_pred_heads[i](query_feat_2x)  # [B, K, 2]
             else:
-                flow_pred_2x = torch.zeros([seg_pred_2x.shape[0], seg_pred_2x.shape[1], 2])
+                flow_pred_2x = torch.zeros([seg_pred_2x.shape[0], seg_pred_2x.shape[1], 2], device=query_feat.device)
 
             # sparsify after seg_pred
             non_free_prob = 1 - F.softmax(seg_pred_2x, dim=-1)[..., -1]  # [B, K]

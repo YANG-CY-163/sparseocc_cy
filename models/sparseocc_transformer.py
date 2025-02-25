@@ -179,7 +179,12 @@ class MaskFormerOccDecoderLayer(BaseModule):
         self.classifier = nn.Linear(embed_dims, num_classes - 1)
         # FFN is used in sparsebev
         if self.flow:
-            self.flow_head = nn.Linear(embed_dims, 2)
+            #self.flow_head = nn.Linear(embed_dims, 2)
+            self.flow_head = nn.Sequential(nn.Linear(embed_dims, 128),
+                                                nn.ReLU(inplace=True),
+                                                nn.Linear(128, 64),
+                                                nn.ReLU(inplace=True),
+                                                nn.Linear(64, 2))
 
         
         self.norm1 = nn.LayerNorm(embed_dims)
