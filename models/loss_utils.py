@@ -330,7 +330,7 @@ class Mask2FormerLoss(nn.Module):
                  loss_cls_weight=1.0, 
                  loss_mask_weight=1.0, 
                  loss_dice_weight=1.0,
-                 loss_flow_weight=0.5,
+                 loss_flow_weight=2.0,
                  no_class_weight=0.1,
                  loss_flow_cfg=None,
                  flow=False):
@@ -413,7 +413,8 @@ class Mask2FormerLoss(nn.Module):
                     # Only compute flow loss on moving objects
                     src_flow = src_flow[moving_mask]
                     tgt_flow = tgt_flow[moving_mask]
-                    loss_flow = self.loss_flow(src_flow, tgt_flow)
+                
+                loss_flow = self.loss_flow(src_flow, tgt_flow)
             
             # pad non-aligned queries' tgt classes with 'no class'
             pad_tgt_class = torch.full(
@@ -491,7 +492,7 @@ def mean(l, empty=0):
 
 
 class FlowLoss(nn.Module):
-    def __init__(self, beta=0.2):
+    def __init__(self, beta=9):
         super().__init__()
         self.beta = beta  # weight factor for speed-based weighting
         
@@ -506,7 +507,8 @@ class FlowLoss(nn.Module):
         # Calculate flow magnitude as weights
         flow_magnitude = torch.norm(gt_flow, dim=-1)  # [N]
         # Normalize weights to [0,1] range
-        weights = 1 + self.beta * (flow_magnitude / flow_magnitude.max())
+        weights = 1 + self.beta * (flow_magnitude / (flow_magnitude.max() + 1e-6))
+        weights = weights / weights.max()
         
         # L1 loss with weights
         loss = F.l1_loss(pred_flow, gt_flow, reduction='none')  # [N, 2]
