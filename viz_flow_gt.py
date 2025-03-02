@@ -47,23 +47,33 @@ color_map = np.array([
     [255, 255, 255, 255],  # free             white
 ], dtype=np.uint8)
 
-def visualize_flow(flow, arrow_interval=5, arrow_width=0.005, arrow_headwidth=3, arrow_headlength=5, save_path=None):
+def visualize_flow(flow, arrow_interval=12, arrow_width=0.01, arrow_headwidth=3, arrow_headlength=5, save_path=None):
     """
     params: flow: [height, width, 2]
     """
     magnitude = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
-    angle = np.arctan2(flow[..., 1], flow[..., 0])
+    angle = np.arctan2(-flow[..., 0], flow[..., 1])  # Negate y component here
     
     # convert to [0, 2*pi]
-    angle = (angle + 2 * np.pi) % (2 * np.pi)
+    angle = (angle + np.pi) % (2 * np.pi)
     hue = angle / (2 * np.pi)
     max_magnitude = np.max(magnitude)
+    #import pdb; pdb.set_trace()
     saturation = magnitude / max_magnitude
     value = np.ones_like(saturation)
     hsv = np.dstack((hue, saturation, value))
     rgb = hsv_to_rgb(hsv)
+    
     fig, ax = plt.subplots()
     ax.imshow(rgb)
+    
+    # Add HSV circle legend
+    # hsv_circle = plt.imread('outputs/viz_flow/hsv_circle.png')
+    # # Create an inset axes in the upper right corner
+    # axins = ax.inset_axes([0.75, 0.05, 0.2, 0.2])  # [x, y, width, height] in relative coordinates
+    # axins.imshow(hsv_circle)
+    #axins.axis('off')
+    
     height, width = flow.shape[:2]
     x, y = np.meshgrid(np.arange(width), np.arange(height))
     mask = magnitude > 0
@@ -71,10 +81,10 @@ def visualize_flow(flow, arrow_interval=5, arrow_width=0.005, arrow_headwidth=3,
     sampled_mask = mask[::arrow_interval, ::arrow_interval]
     sampled_x = x[::arrow_interval, ::arrow_interval][sampled_mask]
     sampled_y = y[::arrow_interval, ::arrow_interval][sampled_mask]
-    sampled_u = flow[::arrow_interval, ::arrow_interval, 0][sampled_mask]
-    sampled_v = flow[::arrow_interval, ::arrow_interval, 1][sampled_mask]
+    sampled_u = flow[::arrow_interval, ::arrow_interval, 1][sampled_mask]
+    sampled_v = -flow[::arrow_interval, ::arrow_interval, 0][sampled_mask]
     # draw arrows
-    ax.quiver(sampled_x, sampled_y, sampled_u, sampled_v, color='black', scale_units='xy', scale=0.1,
+    ax.quiver(sampled_x, sampled_y, sampled_u, sampled_v, color='black', scale_units='xy', scale=0.2,
               width=arrow_width, headwidth=arrow_headwidth, headlength=arrow_headlength)
     ax.axis('off')
     plt.savefig(save_path)
@@ -96,26 +106,50 @@ def occ2img(semantics):
 
     return viz
 
+# def flow_to_2d(flow, semantics, max_flow=10.0):
+#     """
+#     :param flow: [H, W, D, 2]
+#     :param max_flow
+#     :return: image
+#     """
+#     H, W, D, _ = flow.shape
+
+#     free_id = len(occ_class_names) - 1
+#     flow_2d = np.zeros([H, W, 2], dtype=np.float32)
+
+#     for i in range(D):
+#         flow_i = flow[..., i, :]
+#         semantics_i = semantics[..., i]
+#         non_free_mask = (semantics_i != free_id)
+#         flow_2d[non_free_mask] = flow_i[non_free_mask]
+
+#     # flow_2d = flow_2d / max_flow
+#     # flow_2d = np.clip(flow_2d, -1.0, 1.0)
+#     return flow_2d
+
 def flow_to_2d(flow, semantics, max_flow=10.0):
     """
     :param flow: [H, W, D, 2]
-    :param max_flow
-    :return: image
+    :param semantics: [H, W, D]
+    :return: flow2d [H, W, 2]
     """
     H, W, D, _ = flow.shape
-
     free_id = len(occ_class_names) - 1
-    flow_2d = np.zeros([H, W, 2], dtype=np.float32)
-    import pdb;pdb.set_trace()
-
-    for i in range(D):
-        flow_i = flow[..., i, :]
-        semantics_i = semantics[..., i]
-        non_free_mask = (semantics_i != free_id)
-        flow_2d[non_free_mask] = flow_i[non_free_mask]
-
-    # flow_2d = flow_2d / max_flow
-    # flow_2d = np.clip(flow_2d, -1.0, 1.0)
+    mask = (semantics != free_id)
+    import pdb; pdb.set_trace()
+    flow_mag_sq = np.sum(flow**2, axis=-1)
+    
+    masked_mag = np.where(mask, flow_mag_sq, -np.inf)
+    best_d = np.argmax(masked_mag, axis=2)
+    
+    h_idx, w_idx = np.indices((H, W), sparse=False)
+    
+    selected_flow = flow[h_idx, w_idx, best_d]
+    
+    flow_2d = np.zeros((H, W, 2), dtype=np.float32)
+    valid_mask = np.any(mask, axis=2)
+    flow_2d[valid_mask] = selected_flow[valid_mask]
+    
     return flow_2d
 
 def main():
@@ -124,6 +158,7 @@ def main():
     parser.add_argument('--weights', required=True)
     parser.add_argument('--viz-dir', required=True)
     parser.add_argument('--override', nargs='+', action=DictAction)
+    parser.add_argument('--viz_gt', action='store_true')
     args = parser.parse_args()
 
     # parse configs
@@ -167,16 +202,56 @@ def main():
         seed=0,
     )
 
+    logging.info('Creating model: %s' % cfgs.model.type)
+    model = build_model(cfgs.model)
+    model.cuda()
+    model = MMDataParallel(model, [0])
+    model.eval()
+
+    logging.info('Loading checkpoint from %s' % args.weights)
+    load_checkpoint(
+        model, args.weights, map_location='cuda', strict=True,
+        logger=logging.Logger(__name__, logging.ERROR)
+    )
+
     for i, data in tqdm(enumerate(val_loader)):
-        sem_gt = data['voxel_semantics'][0]  # [N]
-        flow_gt = data['flow_gt'][0]
+        if args.viz_gt:
+            sem_gt = data['voxel_semantics'][0].numpy()  # [N]
+            flow_gt = data['flow_gt'][0].numpy()
 
-        sem_viz = occ2img(sem_gt)
-        cv2.imwrite(os.path.join(args.viz_dir, 'sem_%04d.jpg' % i), sem_viz[..., ::-1])
+            sem_viz = occ2img(sem_gt)
+            cv2.imwrite(os.path.join(args.viz_dir, 'sem_gt_%04d.jpg' % i), sem_viz[..., ::-1])
 
-        flow_2d = flow_to_2d(flow_gt, sem_gt)[..., ::-1, :]
-        save_path = os.path.join(args.viz_dir, 'flow_%04d.jpg' % i)
-        visualize_flow(flow_2d, save_path=save_path)
+            flow_2d = flow_to_2d(flow_gt, sem_gt)
+            save_path = os.path.join(args.viz_dir, 'flow_gt_%04d.jpg' % i)
+            visualize_flow(flow_2d, save_path=save_path)
+        
+        # prediction
+        with torch.no_grad():
+            occ_pred = model(return_loss=False, rescale=True, **data)[0]
+            #import pdb; pdb.set_trace()
+            sem_pred = torch.from_numpy(occ_pred['sem_pred'])[0]  # [N]
+            occ_loc = torch.from_numpy(occ_pred['occ_loc'].astype(np.int64))[0]  # [N, 3]
+            flow_pred = torch.from_numpy(occ_pred['flow_pred'])[0]  # [N, 2]
+            
+            # sparse to dense
+            free_id = len(occ_class_names) - 1
+            dense_pred = torch.ones(occ_size, device=sem_pred.device, dtype=sem_pred.dtype) * free_id  # [200, 200, 16]
+            dense_pred[occ_loc[..., 0], occ_loc[..., 1], occ_loc[..., 2]] = sem_pred
+            
+            sem_pred = dense_pred.numpy()
 
+            dense_flow_pred = torch.zeros(occ_size + [2], device=flow_pred.device, dtype=flow_pred.dtype)
+            dense_flow_pred[occ_loc[..., 0], occ_loc[..., 1], occ_loc[..., 2]] = flow_pred
+            flow_pred = dense_flow_pred.numpy()
+
+            # viz
+            sem_viz = occ2img(sem_pred)
+            cv2.imwrite(os.path.join(args.viz_dir, 'sem_%04d.jpg' % i), sem_viz[..., ::-1])
+
+            flow_2d = flow_to_2d(flow_pred, sem_pred)#[..., ::-1, :]
+            save_path = os.path.join(args.viz_dir, 'flow_%04d.jpg' % i)
+            visualize_flow(flow_2d, save_path=save_path)
+        
 if __name__ == '__main__':
     main()
