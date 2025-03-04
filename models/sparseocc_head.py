@@ -6,7 +6,7 @@ from mmcv.runner import force_fp32, auto_fp16
 from mmdet.models.builder import build_loss
 from mmdet.models.utils import build_transformer
 from .matcher import HungarianMatcher
-from .loss_utils import CE_ssc_loss, FlowLoss, lovasz_softmax, get_voxel_decoder_loss_input
+from .loss_utils import CE_ssc_loss, FlowLoss, lovasz_softmax, get_voxel_decoder_loss_input, HybridFlowLoss
 
 
 NUSC_CLASS_FREQ_MAP = {
@@ -69,7 +69,8 @@ class SparseOccHead(nn.Module):
         self.transformer = build_transformer(transformer)
         self.criterions = {k: build_loss(loss_cfg) for k, loss_cfg in loss_cfgs.items()}
         self.matcher = HungarianMatcher(cost_class=2.0, cost_mask=5.0, cost_dice=5.0)
-        self.loss_flow = FlowLoss()
+        #self.loss_flow = FlowLoss()
+        self.loss_flow = HybridFlowLoss()
 
        
         # TODO freq for openocc_v2

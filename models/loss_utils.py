@@ -343,7 +343,8 @@ class Mask2FormerLoss(nn.Module):
         self.no_class_weight = no_class_weight
 
         #self.loss_flow = build_loss(loss_flow_cfg)
-        self.loss_flow = FlowLoss()
+        #self.loss_flow = FlowLoss()
+        self.loss_flow = HybridFlowLoss()
         self.flow = flow
         self.class_names = class_names
 
@@ -515,3 +516,22 @@ class FlowLoss(nn.Module):
         weighted_loss = (weights.unsqueeze(-1) * loss).mean()
         
         return weighted_loss
+    
+class HybridFlowLoss(nn.Module):
+    def __init__(self, beta=9, angle_weight=0.5):
+        super().__init__()
+        self.beta = beta
+        self.angle_weight = angle_weight
+        
+    def forward(self, pred_flow, gt_flow):
+        flow_magnitude = torch.norm(gt_flow, dim=-1)
+        weights = 1 + self.beta * (flow_magnitude / (flow_magnitude.max() + 1e-6))
+        l1_loss = (weights.unsqueeze(-1) * F.l1_loss(pred_flow, gt_flow, reduction='none')).mean()
+        
+        pred_norm = pred_flow / (torch.norm(pred_flow, dim=-1, keepdim=True) + 1e-6)
+        gt_norm = gt_flow / (torch.norm(gt_flow, dim=-1, keepdim=True) + 1e-6)
+        cos_sim = (pred_norm * gt_norm).sum(dim=-1)
+        direction_loss = 1 - cos_sim.mean()
+        
+        total_loss = (1 - self.angle_weight) * l1_loss + self.angle_weight * direction_loss
+        return total_loss
