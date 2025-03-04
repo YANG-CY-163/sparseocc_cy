@@ -43,6 +43,7 @@ class SparseOccHead(nn.Module):
                  panoptic=False,
                  voxel_flow=False,
                  instance_flow=False,
+                 zero_background_flow=True,
                  **kwargs):
         super(SparseOccHead, self).__init__()
         self.num_classes = len(class_names)
@@ -56,6 +57,14 @@ class SparseOccHead(nn.Module):
 
         self.voxel_flow = voxel_flow
         self.instance_flow = instance_flow
+        self.zero_background_flow = zero_background_flow
+
+        # Define moving object classes for flow post-processing
+        self.moving_classes = [
+            'car', 'truck', 'trailer', 'bus', 'construction_vehicle',
+            'bicycle', 'motorcycle', 'pedestrian'
+        ]
+        self.moving_class_ids = [class_names.index(cls) for cls in self.moving_classes if cls in class_names]
 
         self.transformer = build_transformer(transformer)
         self.criterions = {k: build_loss(loss_cfg) for k, loss_cfg in loss_cfgs.items()}
@@ -203,7 +212,25 @@ class SparseOccHead(nn.Module):
         sem_pred = self.merge_semseg(mask_cls, mask_pred)  # [B, C, N]
         outs['sem_pred'] = sem_pred
         outs['occ_loc'] = occ_indices
-        outs['flow_pred'] = outs['occ_preds'][-1][3]  # [B, K, 2]
+        flow_pred = outs['occ_preds'][-1][3]  # [B, K, 2]
+        
+        # Apply post-processing to zero out flow for non-moving classes
+        if self.zero_background_flow and flow_pred is not None:
+            # Get batch size
+            B = sem_pred.shape[0]
+            
+            # Process each batch separately
+            for b in range(B):
+                # Create a mask for moving objects
+                moving_mask = torch.zeros_like(sem_pred[b], dtype=torch.bool)
+                for cls_id in self.moving_class_ids:
+                    moving_mask = moving_mask | (sem_pred[b] == cls_id)
+                
+                # Zero out flow for non-moving objects
+                flow_pred[b][~moving_mask] = 0.0
+        
+        outs['flow_pred'] = flow_pred
+        
 
         if self.panoptic:
             if self.instance_flow:
