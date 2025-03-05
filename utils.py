@@ -62,6 +62,18 @@ class MyTextLoggerHook(TextLoggerHook):
 
         log_str += 'loss: %.2f, ' % log_dict['loss']
 
+        # Print instance loss components
+        loss_keys = [k for k in log_dict.keys() if k.startswith('loss_instance_flow') or k.startswith('loss_voxel_flow')]
+        if len(loss_keys) > 0:
+            log_str += '['
+            for idx, k in enumerate(loss_keys):
+                log_str += '%s: %.2f' % (k, log_dict[k])
+                if idx < len(loss_keys) - 1:
+                    log_str += ', '
+            log_str += '], '
+        if 'grad_norm' in log_dict.keys():
+            log_str += f'grad_norm: {log_dict["grad_norm"]:.2f}, '
+
         if 'time' in log_dict.keys():
             # MOD: skip the first iteration since it's not accurate
             if runner.iter == self.start_iter:
@@ -126,6 +138,7 @@ class MyTextLoggerHook(TextLoggerHook):
             metrics = self.get_loggable_tags(runner)
             runner.logger.info('--- Evaluation Results ---')
             runner.logger.info('RayIoU: %.4f' % metrics['val/RayIoU'])
+            runner.logger.info('mAVE: %.4f' % metrics['val/mAVE'])
 
 
 # @HOOKS.register_module()
