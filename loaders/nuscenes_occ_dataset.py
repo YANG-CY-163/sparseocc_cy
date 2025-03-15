@@ -32,7 +32,7 @@ class NuSceneOcc(NuScenesDataset):
             scene_name = self.token2scene[self.data_infos[i]['token']]
             self.data_infos[i]['scene_name'] = scene_name
 
-    def collect_sweeps(self, index, into_past=150, into_future=0):
+    def collect_sweeps(self, index, into_past=60, into_future=0):
         all_sweeps_prev = []
         curr_index = index
         while len(all_sweeps_prev) < into_past:

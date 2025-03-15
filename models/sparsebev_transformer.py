@@ -276,10 +276,10 @@ class SparseBEVSampling(BaseModule):
         sampling_points = sampling_points.expand(B, Q, self.num_frames, self.num_groups, self.num_points, 3)
 
         # warp sample points based on velocity
-        if query_bbox.shape[-1] > 8:
+        if query_bbox.shape[-1] > 6:
             time_diff = img_metas[0]['time_diff']  # [B, F]
             time_diff = time_diff[:, None, :, None]  # [B, 1, F, 1]
-            vel = query_bbox[..., 8:].detach()  # [B, Q, 2]
+            vel = query_bbox[..., -2:].detach()  # [B, Q, 2]
             vel = vel[:, :, None, :]  # [B, Q, 1, 2]
             dist = vel * time_diff  # [B, Q, F, 2]
             dist = dist[:, :, :, None, None, :]  # [B, Q, F, 1, 1, 2]

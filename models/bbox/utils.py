@@ -43,38 +43,41 @@ def denormalize_bbox(normalized_bboxes):
     return out
 
 
-def encode_bbox(bboxes, pc_range=None):
+def encode_bbox(bboxes, pc_range=None, pred_rot=False, pred_vel=True):
     xyz = bboxes[..., 0:3].clone()
     wlh = bboxes[..., 3:6].log()
-    rot = bboxes[..., 6:7]
+    if pred_rot:
+        rot = bboxes[..., 6:7]
 
     if pc_range is not None:
         xyz[..., 0] = (xyz[..., 0] - pc_range[0]) / (pc_range[3] - pc_range[0])
         xyz[..., 1] = (xyz[..., 1] - pc_range[1]) / (pc_range[4] - pc_range[1])
         xyz[..., 2] = (xyz[..., 2] - pc_range[2]) / (pc_range[5] - pc_range[2])
 
-    if bboxes.shape[-1] > 7:
-        vel = bboxes[..., 7:9].clone()
-        return torch.cat([xyz, wlh, rot.sin(), rot.cos(), vel], dim=-1)
+    if pred_vel:
+        vel = bboxes[..., -2:].clone()
+        return torch.cat([xyz, wlh, rot.sin(), rot.cos(), vel], dim=-1) if pred_rot else torch.cat([xyz, wlh, vel], dim=-1)
     else:
-        return torch.cat([xyz, wlh, rot.sin(), rot.cos()], dim=-1)
+        return torch.cat([xyz, wlh, rot.sin(), rot.cos()], dim=-1) if pred_rot else torch.cat([xyz, wlh], dim=-1)
 
 
-def decode_bbox(bboxes, pc_range=None):
+def decode_bbox(bboxes, pc_range=None, pred_rot=False, pred_vel=True):
     xyz = bboxes[..., 0:3].clone()
     wlh = bboxes[..., 3:6].exp()
-    rot = torch.atan2(bboxes[..., 6:7], bboxes[..., 7:8])
+    if pred_rot:
+        rot = torch.atan2(bboxes[..., 6:7], bboxes[..., 7:8])
 
     if pc_range is not None:
         xyz[..., 0] = xyz[..., 0] * (pc_range[3] - pc_range[0]) + pc_range[0]
         xyz[..., 1] = xyz[..., 1] * (pc_range[4] - pc_range[1]) + pc_range[1]
         xyz[..., 2] = xyz[..., 2] * (pc_range[5] - pc_range[2]) + pc_range[2]
 
-    if bboxes.shape[-1] > 8:
-        vel = bboxes[..., 8:10].clone()
-        return torch.cat([xyz, wlh, rot, vel], dim=-1)
+    if pred_vel:
+        vel = bboxes[..., -2:].clone()
+        return torch.cat([xyz, wlh, rot, vel], dim=-1) if pred_rot else torch.cat([xyz, wlh, vel], dim=-1)
     else:
-        return torch.cat([xyz, wlh, rot], dim=-1)
+        return torch.cat([xyz, wlh, rot], dim=-1) if pred_rot else torch.cat([xyz, wlh], dim=-1)
+
 
 def bbox2occrange(bboxes, occ_size, query_cube_size=None):
     """

@@ -6,6 +6,7 @@ from .sparsebev_transformer import SparseBEVSelfAttention, SparseBEVSampling, Ad
 from .utils import DUMP, generate_grid, batch_indexing
 from .bbox.utils import encode_bbox
 import torch.nn.functional as F
+import numpy as np
 
 
 def index2point(coords, pc_range, voxel_size):
@@ -109,11 +110,11 @@ class SparseVoxelDecoder(BaseModule):
 
             if flow:
                 self.flow_pred_heads.append(nn.Sequential(
-                    nn.Linear(embed_dims, 128),
-                    nn.ReLU(inplace=True),
-                    nn.Linear(128, 64),
-                    nn.ReLU(inplace=True),
-                    nn.Linear(64, 2)
+                    nn.Linear(embed_dims, embed_dims*2),
+                    nn.LeakyReLU(0.1, inplace=True),
+                    nn.Linear(embed_dims*2, embed_dims),
+                    nn.LeakyReLU(0.1, inplace=True),
+                    nn.Linear(embed_dims, 2)
                 ))
 
 
@@ -133,6 +134,15 @@ class SparseVoxelDecoder(BaseModule):
         query_coord = generate_grid(self.voxel_dim, interval).expand(B, -1, -1)  # [B, N, 3]
         query_feat = torch.zeros([B, query_coord.shape[1], self.embed_dims], device=query_coord.device)  # [B, N, C]
 
+        # Extract time differences for flow warping
+        if self.flow:
+            timestamps = np.array([m['img_timestamp'] for m in img_metas], dtype=np.float64)
+            timestamps = np.reshape(timestamps, [query_coord.shape[0], -1, 6])
+            time_diff = timestamps[:, :1, :] - timestamps
+            time_diff = np.mean(time_diff, axis=-1).astype(np.float32)  # [B, F]
+            time_diff = torch.from_numpy(time_diff).to(query_coord.device)  # [B, F]
+            img_metas[0]['time_diff'] = time_diff
+
         for i, layer in enumerate(self.decoder_layers):
             DUMP.stage_count = i
             
@@ -141,7 +151,14 @@ class SparseVoxelDecoder(BaseModule):
             # bbox from coords
             query_bbox = index2point(query_coord, self.pc_range, voxel_size=0.4)  # [B, N, 3]
             query_bbox = point2bbox(query_bbox, box_size=0.4 * interval)  # [B, N, 6]
-            query_bbox = encode_bbox(query_bbox, pc_range=self.pc_range)  # [B, N, 6]
+            pred_vel = False
+            
+            # Include flow prediction in query_bbox if needed
+            if self.flow and i > 0:
+                query_bbox = torch.cat([query_bbox, flow_pred], dim=-1)  # [B, N, 8] with vx, vy
+                pred_vel = True
+                
+            query_bbox = encode_bbox(query_bbox, pc_range=self.pc_range, pred_rot=False, pred_vel=pred_vel)  # [B, N, 6] or [B, N, 8]
 
             # transformer layer
             query_feat = layer(query_feat, query_bbox, mlvl_feats, img_metas)  # [B, N, C]
@@ -167,8 +184,15 @@ class SparseVoxelDecoder(BaseModule):
             query_coord_2x = batch_indexing(query_coord_2x, indices, layout='channel_last')  # [B, K, 3]
             query_feat_2x = batch_indexing(query_feat_2x, indices, layout='channel_last')  # [B, K, C]
             seg_pred_2x = batch_indexing(seg_pred_2x, indices, layout='channel_last')  # [B, K, CLS]
-            if flow_pred_2x is not None:
+
+            if self.flow:
                 flow_pred_2x = batch_indexing(flow_pred_2x, indices, layout='channel_last')  # [B, K, 2]
+
+                time_diff = img_metas[0]['time_diff']  # [B, F]
+                if time_diff.shape[1] > 1:
+                    time_diff = time_diff.clone()
+                    time_diff[time_diff < 1e-5] = 1.0
+                    flow_pred_2x[..., -2:] = flow_pred_2x[..., -2:] / time_diff[:, 1:2, None]
 
 
             occ_preds.append((
@@ -182,6 +206,8 @@ class SparseVoxelDecoder(BaseModule):
 
             query_coord = query_coord_2x.detach()
             query_feat = query_feat_2x.detach()
+            if self.flow:
+                flow_pred = flow_pred_2x.detach()
 
         return occ_preds
 
@@ -230,6 +256,8 @@ class SparseVoxelDecoderLayer(BaseModule):
         
         self.norm2 = nn.LayerNorm(embed_dims)
         self.norm3 = nn.LayerNorm(embed_dims)
+        
+        self.pc_range = pc_range  # Store pc_range for flow warping
 
     @torch.no_grad()
     def init_weights(self):
@@ -245,6 +273,8 @@ class SparseVoxelDecoderLayer(BaseModule):
 
         if self.self_attn is not None:
             query_feat = self.norm1(self.self_attn(query_bbox, query_feat))
+        
+        # Handle flow warping similar to SparseBEV
         sampled_feat = self.sampling(query_bbox, query_feat, mlvl_feats, img_metas)
         query_feat = self.norm2(self.mixing(sampled_feat, query_feat))
         query_feat = self.norm3(self.ffn(query_feat))
