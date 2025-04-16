@@ -9,12 +9,13 @@ import torch.distributed as dist
 from datetime import datetime
 from mmcv import Config, DictAction
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
-from mmcv.runner import EpochBasedRunner, build_optimizer, load_checkpoint
+from mmcv.runner import EpochBasedRunner, build_optimizer, load_checkpoint, IterBasedRunner
 from mmdet.apis import set_random_seed
 from mmdet.core import DistEvalHook, EvalHook
 from mmdet3d.datasets import build_dataset
 from mmdet3d.models import build_model
 from loaders.builder import build_dataloader
+from utils import CustomDistEvalHook
 
 
 def main():
@@ -145,6 +146,17 @@ def main():
         meta=dict(),
     )
 
+    # for seq config
+    if 'runner' in cfgs and cfgs.runner.type == "IterBasedRunner":
+        runner = IterBasedRunner(
+            model,
+            optimizer=optimizer,
+            work_dir=work_dir,
+            logger=logging.root,
+            max_iters=cfgs.num_epochs * cfgs.num_iters_per_epoch,
+            meta=dict(),
+        )
+
     runner.register_lr_hook(cfgs.lr_config)
     runner.register_optimizer_hook(cfgs.optimizer_config)
     runner.register_checkpoint_hook(cfgs.checkpoint_config)
@@ -152,9 +164,15 @@ def main():
     runner.register_timer_hook(dict(type='IterTimerHook'))
     runner.register_custom_hooks(dict(type='DistSamplerSeedHook'))
 
+    if isinstance(runner, EpochBasedRunner):
+        runner.register_custom_hooks(dict(type='DistSamplerSeedHook'))
+    else:
+        runner.register_custom_hooks(cfgs.get('custom_hooks', None))
+
     if cfgs.eval_config['interval'] > 0:
+        by_epoch = cfgs.runner['type'] != 'IterBasedRunner'
         if world_size > 1:
-            runner.register_hook(DistEvalHook(val_loader, interval=cfgs.eval_config['interval'], gpu_collect=True))
+            runner.register_hook(CustomDistEvalHook(val_loader, interval=cfgs.eval_config['interval'], by_epoch=by_epoch, gpu_collect=True))
         else:
             runner.register_hook(EvalHook(val_loader, interval=cfgs.eval_config['interval']))
 

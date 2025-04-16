@@ -1,4 +1,6 @@
+import math
 import os
+import random
 import mmcv
 import glob
 import torch
@@ -14,13 +16,15 @@ from .ray_metrics import main_rayiou, main_raypq
 from .ego_pose_dataset import EgoPoseDataset
 from configs.r50_nuimg_704x256_8f import occ_class_names as occ3d_class_names
 from configs.r50_nuimg_704x256_8f_openocc import occ_class_names as openocc_class_names
+from mmcv.parallel import DataContainer as DC
 
 @DATASETS.register_module()
 class NuSceneOcc(NuScenesDataset):    
-    def __init__(self, occ_gt_root, *args, **kwargs):
+    def __init__(self, occ_gt_root, seq_mode=False, seq_split_num=1, *args, **kwargs):
         super().__init__(filter_empty_gt=False, *args, **kwargs)
         self.occ_gt_root = occ_gt_root
         self.data_infos = self.load_annotations(self.ann_file)
+        self.seq_mode = seq_mode
 
         self.token2scene = {}
         for gt_path in glob.glob(os.path.join(self.occ_gt_root, '*/*/*.npz')):
@@ -31,6 +35,51 @@ class NuSceneOcc(NuScenesDataset):
         for i in range(len(self.data_infos)):
             scene_name = self.token2scene[self.data_infos[i]['token']]
             self.data_infos[i]['scene_name'] = scene_name
+
+        if seq_mode:
+            self.num_frame_losses = 1
+            self.queue_length = 1
+            self.seq_split_num = seq_split_num
+            self.random_length = 0
+            self._set_sequence_group_flag() # Must be called after load_annotations b/c load_annotations does sorting.
+
+    def _set_sequence_group_flag(self):
+        """
+        Set each sequence to be a different group
+        """
+        res = []
+
+        curr_sequence = 0
+        for idx in range(len(self.data_infos)):
+            if idx != 0 and len(self.data_infos[idx]['sweeps']) == 0:
+                # Not first frame and # of sweeps is 0 -> new sequence
+                curr_sequence += 1
+            res.append(curr_sequence)
+
+        self.flag = np.array(res, dtype=np.int64)
+
+        if self.seq_split_num != 1:
+            if self.seq_split_num == 'all':
+                self.flag = np.array(range(len(self.data_infos)), dtype=np.int64)
+            else:
+                bin_counts = np.bincount(self.flag)
+                new_flags = []
+                curr_new_flag = 0
+                for curr_flag in range(len(bin_counts)):
+                    curr_sequence_length = np.array(
+                        list(range(0, 
+                                bin_counts[curr_flag], 
+                                math.ceil(bin_counts[curr_flag] / self.seq_split_num)))
+                        + [bin_counts[curr_flag]])
+
+                    for sub_seq_idx in (curr_sequence_length[1:] - curr_sequence_length[:-1]):
+                        for _ in range(sub_seq_idx):
+                            new_flags.append(curr_new_flag)
+                        curr_new_flag += 1
+
+                assert len(new_flags) == len(self.flag)
+                assert len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.seq_split_num
+                self.flag = np.array(new_flags, dtype=np.int64)
 
     def collect_sweeps(self, index, into_past=150, into_future=0):
         all_sweeps_prev = []
@@ -55,6 +104,75 @@ class NuSceneOcc(NuScenesDataset):
 
         return all_sweeps_prev, all_sweeps_next
 
+    def prepare_train_data(self, index):
+        """
+        Training data preparation.
+        Args:
+            index (int): Index for accessing the target data.
+        Returns:
+            dict: Training data dict of the corresponding index.
+        """
+        import pdb; pdb.set_trace()
+        queue = []
+        index_list = list(range(index-self.queue_length-self.random_length+1, index))
+        random.shuffle(index_list)
+        index_list = sorted(index_list[self.random_length:])
+        index_list.append(index)
+        prev_scene_token = None
+        for i in index_list:
+            i = max(0, i)
+            input_dict = self.get_data_info(i)
+            
+            if not self.seq_mode: # for sliding window 
+                if input_dict['scene_token'] != prev_scene_token:
+                    input_dict.update(dict(prev_exists=False))
+                    prev_scene_token = input_dict['scene_token']
+                else:
+                    input_dict.update(dict(prev_exists=True))
+            
+            self.pre_pipeline(input_dict)
+            example = self.pipeline(input_dict)
+            queue.append(example)
+
+        for k in range(self.num_frame_losses):
+            if self.filter_empty_gt and \
+                (queue[-k-1] is None or ~(queue[-k-1]['gt_labels_3d']._data != -1).any()):
+                return None
+        return self.union2one(queue)
+    
+    def prepare_test_data(self, index):
+        """Prepare data for testing.
+
+        Args:
+            index (int): Index for accessing the target data.
+
+        Returns:
+            dict: Testing data dict of the corresponding index.
+        """
+        input_dict = self.get_data_info(index)
+        self.pre_pipeline(input_dict)
+        example = self.pipeline(input_dict)
+        return example
+
+    def union2one(self, queue):
+        for key in self.collect_keys:
+            if key != 'img_metas':
+                queue[-1][key] = DC(torch.stack([each[key].data for each in queue]), cpu_only=False, stack=True, pad_dims=None)
+            else:
+                queue[-1][key] = DC([each[key].data for each in queue], cpu_only=True)
+        if not self.test_mode:
+            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_depth', 'focal']:
+                if key == 'gt_bboxes_3d':
+                    queue[-1][key] = DC([each[key].data for each in queue], cpu_only=True)
+                else:
+                    if key == 'focal':
+                        queue[-1][key] = DC(torch.stack([each[key].data for each in queue]), cpu_only=False, stack=True, pad_dims=None)
+                    else:
+                        queue[-1][key] = DC([each[key].data for each in queue], cpu_only=False)
+
+        queue = queue[-1]
+        return queue
+    
     def get_data_info(self, index):
         info = self.data_infos[index]
         sweeps_prev, sweeps_next = self.collect_sweeps(index)
@@ -74,6 +192,7 @@ class NuSceneOcc(NuScenesDataset):
             ego2global_rotation=ego2global_rotation_mat,
             lidar2ego_translation=lidar2ego_translation,
             lidar2ego_rotation=lidar2ego_rotation_mat,
+            scene_token=info['scene_token']
         )
 
         ego2lidar = transform_matrix(lidar2ego_translation, Quaternion(lidar2ego_rotation), inverse=True)
@@ -103,15 +222,21 @@ class NuSceneOcc(NuScenesDataset):
                 lidar2img_rt = (viewpad @ lidar2cam_rt.T)
                 lidar2img_rts.append(lidar2img_rt)
 
+            if not self.test_mode: # for seq_mode
+                prev_exists  = not (index == 0 or self.flag[index - 1] != self.flag[index])
+            else:
+                prev_exists = None
+
             input_dict.update(dict(
                 img_filename=img_paths,
                 img_timestamp=img_timestamps,
                 lidar2img=lidar2img_rts,
+                prev_exists=prev_exists
             ))
 
-        if not self.test_mode:
-            annos = self.get_ann_info(index)
-            input_dict['ann_info'] = annos
+            if not self.test_mode:
+                annos = self.get_ann_info(index)
+                input_dict['ann_info'] = annos
 
         return input_dict
 

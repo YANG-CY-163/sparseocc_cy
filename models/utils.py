@@ -33,6 +33,50 @@ def sparse2dense(indices, value, dense_shape, empty_value=0):
 
     return dense, mask
 
+def history_bbox_warp(bbox, T_temp2cur, time_diff, pc_range=None):
+
+    T_temp2cur = torch.unsqueeze(T_temp2cur,  dim=1)  # [B, 1, 4, 4]
+    
+    pc_range_min = pc_range[:3]
+    pc_range_max = pc_range[3:6]
+    pc_range_scale = pc_range_max - pc_range_min
+    
+    out_bbox = bbox.clone()
+    center = out_bbox[..., :3] * pc_range_scale + pc_range_min  # [B, K, 3]
+    
+    # there is no vel_dim for box in waymo
+    if bbox.shape[-1] > 8:
+        # warp center based on velocity
+        vel = bbox[..., -2:]  # [B, K, 2]
+        dist = vel * time_diff[..., None, None].to(dtype=vel.dtype)  # [B, 1, 1]
+        center = torch.cat([
+            center[..., 0:2] + dist,
+            center[..., 2:3]
+        ], dim=-1)
+
+    center = torch.cat([center, torch.ones_like(center[..., :1])], dim=-1)  # [B, K, 4]
+    
+    yaw = torch.cat([out_bbox[..., 6:8].flip(-1), torch.zeros_like(center[..., :2])], dim=-1)  # [B, K, 4]
+    vel_mat = torch.cat([out_bbox[..., -2:], torch.zeros_like(center[..., :2])], dim=-1)  # [B, K, 4]
+    box_mat = torch.stack([center, yaw, vel_mat], dim=-1)  # [B, K, 4, 3]
+
+    warpped_box = T_temp2cur @ box_mat  # [B, 1, 4, 4] @ [B, K, 4, 3] -> [B, K, 4, 3]
+    
+    transformed_center = warpped_box[..., :3, 0]  # [B, K, 3]
+    
+    out_bbox[..., :3] = (transformed_center - pc_range_min) / pc_range_scale
+    out_bbox[..., 6:8] = warpped_box[..., :2, 1].flip(-1)  # [B, K, 2]
+    if bbox.shape[-1] > 8:
+        out_bbox[..., -2:] = warpped_box[..., :2, 2]  # [B, K, 2]
+    
+    return out_bbox
+
+# https://github.com/exiawsh/StreamPETR/blob/2315cf9f077817ec7089c87094ba8a63f76c2acf/projects/mmdet3d_plugin/models/utils/misc.py#L7
+def memory_refresh(memory, prev_exist):
+    memory_shape = memory.shape
+    view_shape = [1 for _ in range(len(memory_shape))]
+    prev_exist = prev_exist.view(-1, *view_shape[1:]) 
+    return memory * prev_exist
 
 @torch.no_grad()
 def generate_grid(n_vox, interval):
