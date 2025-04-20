@@ -20,10 +20,16 @@ from mmcv.parallel import DataContainer as DC
 
 @DATASETS.register_module()
 class NuSceneOcc(NuScenesDataset):    
-    def __init__(self, occ_gt_root, seq_mode=False, seq_split_num=1, *args, **kwargs):
+    def __init__(self, occ_gt_root, collect_keys, seq_mode=False, seq_split_num=1, num_frame_losses=1, queue_length=8, random_length=0, *args, **kwargs):
         super().__init__(filter_empty_gt=False, *args, **kwargs)
         self.occ_gt_root = occ_gt_root
         self.data_infos = self.load_annotations(self.ann_file)
+        self.seq_mode = seq_mode
+
+        self.queue_length = queue_length
+        self.collect_keys = collect_keys
+        self.random_length = random_length
+        self.num_frame_losses = num_frame_losses
         self.seq_mode = seq_mode
 
         self.token2scene = {}
@@ -112,7 +118,6 @@ class NuSceneOcc(NuScenesDataset):
         Returns:
             dict: Training data dict of the corresponding index.
         """
-        import pdb; pdb.set_trace()
         queue = []
         index_list = list(range(index-self.queue_length-self.random_length+1, index))
         random.shuffle(index_list)
@@ -134,10 +139,6 @@ class NuSceneOcc(NuScenesDataset):
             example = self.pipeline(input_dict)
             queue.append(example)
 
-        for k in range(self.num_frame_losses):
-            if self.filter_empty_gt and \
-                (queue[-k-1] is None or ~(queue[-k-1]['gt_labels_3d']._data != -1).any()):
-                return None
         return self.union2one(queue)
     
     def prepare_test_data(self, index):
@@ -160,15 +161,6 @@ class NuSceneOcc(NuScenesDataset):
                 queue[-1][key] = DC(torch.stack([each[key].data for each in queue]), cpu_only=False, stack=True, pad_dims=None)
             else:
                 queue[-1][key] = DC([each[key].data for each in queue], cpu_only=True)
-        if not self.test_mode:
-            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_depth', 'focal']:
-                if key == 'gt_bboxes_3d':
-                    queue[-1][key] = DC([each[key].data for each in queue], cpu_only=True)
-                else:
-                    if key == 'focal':
-                        queue[-1][key] = DC(torch.stack([each[key].data for each in queue]), cpu_only=False, stack=True, pad_dims=None)
-                    else:
-                        queue[-1][key] = DC([each[key].data for each in queue], cpu_only=False)
 
         queue = queue[-1]
         return queue
@@ -184,6 +176,11 @@ class NuSceneOcc(NuScenesDataset):
         ego2global_rotation_mat = Quaternion(ego2global_rotation).rotation_matrix
         lidar2ego_rotation_mat = Quaternion(lidar2ego_rotation).rotation_matrix
 
+        e2g_matrix = convert_egopose_to_matrix_numpy(ego2global_rotation_mat, ego2global_translation)
+        l2e_matrix = convert_egopose_to_matrix_numpy(lidar2ego_rotation_mat, lidar2ego_translation)
+        ego_pose =  e2g_matrix @ l2e_matrix # lidar2global
+        ego_pose_inv = invert_matrix_egopose_numpy(ego_pose)
+
         input_dict = dict(
             sample_idx=info['token'],
             sweeps={'prev': sweeps_prev, 'next': sweeps_next},
@@ -192,7 +189,9 @@ class NuSceneOcc(NuScenesDataset):
             ego2global_rotation=ego2global_rotation_mat,
             lidar2ego_translation=lidar2ego_translation,
             lidar2ego_rotation=lidar2ego_rotation_mat,
-            scene_token=info['scene_token']
+            scene_token=info['scene_name'],
+            ego_pose=ego_pose,
+            ego_pose_inv=ego_pose_inv
         )
 
         ego2lidar = transform_matrix(lidar2ego_translation, Quaternion(lidar2ego_rotation), inverse=True)
@@ -310,3 +309,20 @@ class NuSceneOcc(NuScenesDataset):
             np.savez_compressed(save_path, occ_pred.astype(np.uint8))
         
         print('\nFinished.')
+
+def invert_matrix_egopose_numpy(egopose):
+    """ Compute the inverse transformation of a 4x4 egopose numpy matrix."""
+    inverse_matrix = np.zeros((4, 4), dtype=np.float32)
+    rotation = egopose[:3, :3]
+    translation = egopose[:3, 3]
+    inverse_matrix[:3, :3] = rotation.T
+    inverse_matrix[:3, 3] = -np.dot(rotation.T, translation)
+    inverse_matrix[3, 3] = 1.0
+    return inverse_matrix
+
+def convert_egopose_to_matrix_numpy(rotation, translation):
+    transformation_matrix = np.zeros((4, 4), dtype=np.float32)
+    transformation_matrix[:3, :3] = rotation
+    transformation_matrix[:3, 3] = translation
+    transformation_matrix[3, 3] = 1.0
+    return transformation_matrix

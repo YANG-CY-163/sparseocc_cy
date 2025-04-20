@@ -12,7 +12,7 @@ import wandb
 from mmcv.runner.hooks import HOOKS
 from mmcv.runner.hooks.logger import LoggerHook, TextLoggerHook
 from mmcv.runner.dist_utils import master_only
-from torch.utils.tensorboard import SummaryWriter
+#from torch.utils.tensorboard import SummaryWriter
 import time
 import torch.distributed as dist
 from mmcv.runner import get_dist_info
@@ -140,56 +140,56 @@ class MyTextLoggerHook(TextLoggerHook):
             runner.logger.info('RayIoU: %.4f' % metrics['val/RayIoU'])
 
 
-@HOOKS.register_module()
-class MyTensorboardLoggerHook(LoggerHook):
-    def __init__(self, log_dir=None, interval=10, ignore_last=True, reset_flag=False, by_epoch=True):
-        super(MyTensorboardLoggerHook, self).__init__(
-            interval, ignore_last, reset_flag, by_epoch)
-        self.log_dir = log_dir
+# @HOOKS.register_module()
+# class MyTensorboardLoggerHook(LoggerHook):
+#     def __init__(self, log_dir=None, interval=10, ignore_last=True, reset_flag=False, by_epoch=True):
+#         super(MyTensorboardLoggerHook, self).__init__(
+#             interval, ignore_last, reset_flag, by_epoch)
+#         self.log_dir = log_dir
 
-    @master_only
-    def before_run(self, runner):
-        super(MyTensorboardLoggerHook, self).before_run(runner)
-        if self.log_dir is None:
-            self.log_dir = runner.work_dir
-        self.writer = SummaryWriter(self.log_dir)
+#     @master_only
+#     def before_run(self, runner):
+#         super(MyTensorboardLoggerHook, self).before_run(runner)
+#         if self.log_dir is None:
+#             self.log_dir = runner.work_dir
+#         self.writer = SummaryWriter(self.log_dir)
 
-    @master_only
-    def log(self, runner):
-        tags = self.get_loggable_tags(runner)
+#     @master_only
+#     def log(self, runner):
+#         tags = self.get_loggable_tags(runner)
 
-        for key, value in tags.items():
-            # MOD: merge into the 'train' group
-            if key == 'learning_rate':
-                key = 'train/learning_rate'
+#         for key, value in tags.items():
+#             # MOD: merge into the 'train' group
+#             if key == 'learning_rate':
+#                 key = 'train/learning_rate'
 
-            # MOD: skip momentum
-            ignore = False
-            if key == 'momentum':
-                ignore = True
+#             # MOD: skip momentum
+#             ignore = False
+#             if key == 'momentum':
+#                 ignore = True
 
-            # MOD: skip intermediate losses
-            for i in range(5):
-                if key[:13] == 'train/d%d.loss' % i:
-                    ignore = True
+#             # MOD: skip intermediate losses
+#             for i in range(5):
+#                 if key[:13] == 'train/d%d.loss' % i:
+#                     ignore = True
 
-            if self.get_mode(runner) == 'train' and key[:5] != 'train':
-                ignore = True
+#             if self.get_mode(runner) == 'train' and key[:5] != 'train':
+#                 ignore = True
 
-            if self.get_mode(runner) != 'train' and key[:3] != 'val':
-                ignore = True
+#             if self.get_mode(runner) != 'train' and key[:3] != 'val':
+#                 ignore = True
 
-            if ignore:
-                continue
+#             if ignore:
+#                 continue
 
-            if key[:5] == 'train':
-                self.writer.add_scalar(key, value, self.get_iter(runner))
-            elif key[:3] == 'val':
-                self.writer.add_scalar(key, value, self.get_epoch(runner))
+#             if key[:5] == 'train':
+#                 self.writer.add_scalar(key, value, self.get_iter(runner))
+#             elif key[:3] == 'val':
+#                 self.writer.add_scalar(key, value, self.get_epoch(runner))
 
-    @master_only
-    def after_run(self, runner):
-        self.writer.close()
+#     @master_only
+#     def after_run(self, runner):
+#         self.writer.close()
 
 
 # modified from mmcv.runner.hooks.logger.wandb
