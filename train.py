@@ -106,6 +106,9 @@ def main():
         dist=world_size > 1,
         shuffle=True,
         seed=0,
+        shuffler_sampler=cfgs.data.shuffler_sampler,  
+        nonshuffler_sampler=cfgs.data.nonshuffler_sampler,  
+        runner_type=cfgs.runner,
     )
 
     logging.info('Loading validation set from %s' % cfgs.dataset_root)
@@ -116,7 +119,8 @@ def main():
         workers_per_gpu=cfgs.data.workers_per_gpu,
         num_gpus=world_size,
         dist=world_size > 1,
-        shuffle=False
+        shuffle=False,
+        nonshuffler_sampler=cfgs.data.nonshuffler_sampler
     )
 
     logging.info('Creating model: %s' % cfgs.model.type)
@@ -162,7 +166,6 @@ def main():
     runner.register_checkpoint_hook(cfgs.checkpoint_config)
     runner.register_logger_hooks(cfgs.log_config)
     runner.register_timer_hook(dict(type='IterTimerHook'))
-    runner.register_custom_hooks(dict(type='DistSamplerSeedHook'))
 
     if isinstance(runner, EpochBasedRunner):
         runner.register_custom_hooks(dict(type='DistSamplerSeedHook'))
@@ -174,7 +177,7 @@ def main():
         if world_size > 1:
             runner.register_hook(CustomDistEvalHook(val_loader, interval=cfgs.eval_config['interval'], by_epoch=by_epoch, gpu_collect=True))
         else:
-            runner.register_hook(EvalHook(val_loader, interval=cfgs.eval_config['interval']))
+            runner.register_hook(EvalHook(val_loader, interval=cfgs.eval_config['interval'], by_epoch=by_epoch))
 
     if cfgs.resume_from is not None:
         logging.info('Resuming from %s' % cfgs.resume_from)

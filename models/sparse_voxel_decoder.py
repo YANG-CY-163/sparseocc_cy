@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 from mmcv.runner import BaseModule
 from mmcv.cnn.bricks.transformer import FFN
-from .sparsebev_transformer import SparseBEVSelfAttention, SparseBEVSampling, AdaptiveMixing
-from .utils import DUMP, generate_grid, batch_indexing
+from .sparsebev_transformer import SparseBEVSelfAttention, SparseBEVSampling, AdaptiveMixing, TimeAdaptiveAttention
+from .utils import DUMP, generate_grid, batch_indexing, history_bbox_warp
 from .bbox.utils import encode_bbox
 import torch.nn.functional as F
+from mmcv.cnn.bricks.transformer import MultiheadAttention, FFN
 
 
 def index2point(coords, pc_range, voxel_size):
@@ -64,7 +65,8 @@ class SparseVoxelDecoder(BaseModule):
                  semantic=False,
                  topk_training=None,
                  topk_testing=None,
-                 pc_range=None):
+                 pc_range=None,
+                 memory_config=dict(),):
         super().__init__()
 
         self.embed_dims = embed_dims
@@ -102,6 +104,23 @@ class SparseVoxelDecoder(BaseModule):
             if semantic:
                 self.seg_pred_heads.append(nn.Linear(embed_dims, num_classes))
 
+        # init memory
+        self.num_history = memory_config['num_history']
+        self.max_time_interval = memory_config['max_time_interval']
+        self.memory_len = memory_config['memory_len']
+        self.len_per_frame = memory_config['len_per_frame']
+        self.interval = memory_config['interval']
+        
+        self.propagate_feat = None
+        self.propagate_bbox = None
+        self.metas = None
+        self.mask = None
+        self.cls_scores = None
+        self.memory_feat = None
+        self.memory_bbox = None
+
+        self.padding_bbox = nn.Embedding(self.num_history, 3)  # (x, y, z)
+
     @torch.no_grad()
     def init_weights(self):
         for i in range(len(self.decoder_layers)):
@@ -128,8 +147,14 @@ class SparseVoxelDecoder(BaseModule):
             query_bbox = point2bbox(query_bbox, box_size=0.4 * interval)  # [B, N, 6]
             query_bbox = encode_bbox(query_bbox, pc_range=self.pc_range)  # [B, N, 6]
 
+            # warp history query_bbox to current frame
+            temp_query_feat, temp_query_bbox = self.temporal_warp(img_metas, i)
+
             # transformer layer
-            query_feat = layer(query_feat, query_bbox, mlvl_feats, img_metas)  # [B, N, C]
+            query_feat = layer(query_feat, query_bbox, temp_query_feat, temp_query_bbox, mlvl_feats, img_metas)  # [B, N, C]
+
+            # update the memory bank
+            self.update_memory(query_feat, query_bbox, img_metas, i)
             
             # upsample 2x
             query_feat = self.lift_feat_heads[i](query_feat)  # [B, N, 8C]
@@ -160,6 +185,70 @@ class SparseVoxelDecoder(BaseModule):
             query_feat = query_feat_2x.detach()
 
         return occ_preds
+    
+    def temporal_warp(self, **data):
+
+        if self.propagate_bbox is not None:
+            
+            time_interval = (data["timestamp"] - self.metas["timestamp"]).to(self.propagate_bbox.device)
+            pc_range = self.pc_range.to(self.propagate_bbox.device)
+            T_temp2cur = data["ego_pose_inv"]  @ self.metas["ego_pose"]  # global2lidar @ lidar2global
+            
+            self.propagate_bbox = history_bbox_warp(self.propagate_bbox, T_temp2cur, time_interval, pc_range)
+            self.memory_bbox = history_bbox_warp(self.memory_bbox, T_temp2cur, time_interval, pc_range)
+            
+            # self.mask = data['prev_exists'].bool()
+            valid_mask = (torch.abs(time_interval) <= self.max_time_interval)
+            self.mask = valid_mask
+
+        if self.interval == 1 :
+            return self.memory_feat, self.memory_bbox
+        
+        else:
+            if self.memory_feat is not None and self.memory_feat.shape[1] > self.len_per_frame:
+                num_frames = self.memory_feat.shape[1] // self.len_per_frame
+
+                return torch.cat([self.memory_feat[:, i * self.len_per_frame: i * self.len_per_frame + self.len_per_frame] for i in range(1, num_frames, 2)], dim=1), \
+                    torch.cat([self.memory_bbox[:, i * self.len_per_frame: i * self.len_per_frame + self.len_per_frame] for i in range(1, num_frames, 2)], dim=1)
+                
+            else:
+                return None, None
+    
+    def update_memory(self, outs_dec, bbox_preds, cls_scores, mask_dict=None, **metas):
+
+        if self.num_history > 0:  # 500
+            # NOTE add use dn
+            if self.training and mask_dict and mask_dict['pad_size'] > 0:
+                outs_dec = outs_dec[:, mask_dict['pad_size']:, :]
+                bbox_preds = bbox_preds[:, mask_dict['pad_size']:, :]
+                cls_scores = cls_scores[:, mask_dict['pad_size']:, :]
+            
+            outs_dec = outs_dec.detach()
+            bbox_preds = bbox_preds.detach()
+            cls_scores = cls_scores.detach()  # [B, Q, 10]
+
+            self.metas = metas
+
+            cls_scores, _ = cls_scores.max(-1)  # [B, Q]
+            cls_scores, indices = torch.topk(cls_scores, k=self.num_history, dim=1)  # [B, K]
+            
+            self.cls_scores = torch.sigmoid(cls_scores)
+            self.propagate_feat = batch_indexing(outs_dec, indices, layout='channel_last')  # [B, K, C]
+            self.propagate_bbox = batch_indexing(bbox_preds, indices, layout='channel_last')  # [B, K, 10]
+            
+            # TODO memory queue is for cross attn
+            # not merge cached query and memory queue 
+            # since self.len_per_frame is 256 and self.num_history is 500 for now
+            memory_bbox = self.propagate_bbox[:, :self.len_per_frame]
+            memory_feat = self.propagate_feat[:, :self.len_per_frame]
+            
+            # update memory queue
+            if self.memory_feat is None:
+                self.memory_feat = memory_feat
+                self.memory_bbox = memory_bbox
+            else:
+                self.memory_feat = torch.cat([memory_feat, self.memory_feat], dim=1)[:, :self.memory_len]
+                self.memory_bbox = torch.cat([memory_bbox, self.memory_bbox], dim=1)[:, :self.memory_len]
 
 
 class SparseVoxelDecoderLayer(BaseModule):
@@ -187,6 +276,9 @@ class SparseVoxelDecoderLayer(BaseModule):
             self.norm1 = nn.LayerNorm(embed_dims)
         else:
             self.self_attn = None
+
+        self.cross_attn = TimeAdaptiveAttention(embed_dims, num_heads=8, dropout=0.1, frames=4, num_per_frame=256)
+        self.cross_attn = MultiheadAttention(embed_dims, num_heads=8, dropout=0.1, batch_first=True)
         
         self.sampling = SparseBEVSampling(
             embed_dims=embed_dims,
@@ -206,6 +298,7 @@ class SparseVoxelDecoderLayer(BaseModule):
         
         self.norm2 = nn.LayerNorm(embed_dims)
         self.norm3 = nn.LayerNorm(embed_dims)
+        self.norm_temp = nn.LayerNorm(embed_dims)
 
     @torch.no_grad()
     def init_weights(self):
@@ -215,8 +308,22 @@ class SparseVoxelDecoderLayer(BaseModule):
         self.mixing.init_weights()
         self.ffn.init_weights()
 
-    def forward(self, query_feat, query_bbox, mlvl_feats, img_metas):
+    def forward(self, query_feat, query_bbox, temp_query_feat, temp_query_bbox, mlvl_feats, img_metas):
         query_pos = self.position_encoder(query_bbox[..., :3])
+
+        # temporal attn
+        if self.training:
+            if temp_query_bbox is not None:
+                temp_pos = self.position_encoder(temp_query_bbox)
+            else:
+                temp_pos = None
+        else:
+            if DUMP.stage_count == 0 and temp_query_bbox is not None:
+                temp_pos = self.position_encoder(temp_query_bbox)
+
+        query_feat = self.norm_temp(self.cross_attn(query_feat, temp_query_feat,
+                                                    query_pos=query_pos, key_pos=temp_pos))
+        
         query_feat = query_feat + query_pos
 
         if self.self_attn is not None:
