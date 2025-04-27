@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from mmcv.runner import BaseModule
 from mmcv.cnn.bricks.transformer import FFN
-from .sparsebev_transformer import SparseBEVSelfAttention, SparseBEVSampling, AdaptiveMixing, TimeAdaptiveAttention
+from .sparsebev_transformer import MultiheadFlashAttention, SparseBEVSelfAttention, SparseBEVSampling, AdaptiveMixing, TimeAdaptiveAttention
 from .utils import DUMP, generate_grid, batch_indexing, history_coord_warp
 from .bbox.utils import encode_bbox
 import torch.nn.functional as F
@@ -153,8 +153,9 @@ class SparseVoxelDecoder(BaseModule):
 
             # warp history query_bbox to current frame
             temp_query_feat, temp_query_points = self.temporal_warp(img_metas, i)
-            temp_query_bbox = point2bbox(temp_query_points, box_size=0.4 * interval)  # [B, N, 6]
-            temp_query_bbox = encode_bbox(temp_query_bbox, pc_range=self.pc_range)  # [B, N, 6]
+            temp_query_bbox = None
+            if temp_query_points is not None:
+                temp_query_bbox = encode_bbox(temp_query_points, pc_range=self.pc_range)  # [B, N, 6]
 
             # transformer layer
             query_feat = layer(query_feat, query_bbox, temp_query_feat, temp_query_bbox, mlvl_feats, img_metas)  # [B, N, C]
@@ -293,6 +294,7 @@ class SparseVoxelDecoderLayer(BaseModule):
 
         #self.cross_attn = TimeAdaptiveAttention(embed_dims, num_heads=8, dropout=0.1, frames=4, num_per_frame=256)
         #self.cross_attn = MultiheadAttention(embed_dims, num_heads=8, dropout=0.1, batch_first=True)
+        self.cross_attn = MultiheadFlashAttention(embed_dims, num_heads=8, dropout=0.1, batch_first=True)
         
         self.sampling = SparseBEVSampling(
             embed_dims=embed_dims,
@@ -312,7 +314,7 @@ class SparseVoxelDecoderLayer(BaseModule):
         
         self.norm2 = nn.LayerNorm(embed_dims)
         self.norm3 = nn.LayerNorm(embed_dims)
-        #self.norm_temp = nn.LayerNorm(embed_dims)
+        self.norm_temp = nn.LayerNorm(embed_dims)
 
     @torch.no_grad()
     def init_weights(self):
@@ -326,17 +328,17 @@ class SparseVoxelDecoderLayer(BaseModule):
         query_pos = self.position_encoder(query_bbox[..., :3])  # [B, N, C]
 
         # temporal attn
-        # if self.training:
-        #     if temp_query_bbox is not None:
-        #         temp_pos = self.position_encoder(temp_query_bbox)
-        #     else:
-        #         temp_pos = None
-        # else:
-        #     if DUMP.stage_count == 0 and temp_query_bbox is not None:
-        #         temp_pos = self.position_encoder(temp_query_bbox)
+        if self.training:
+            if temp_query_bbox is not None:
+                temp_pos = self.position_encoder(temp_query_bbox)
+            else:
+                temp_pos = None
+        else:
+            if DUMP.stage_count == 0 and temp_query_bbox is not None:
+                temp_pos = self.position_encoder(temp_query_bbox)
 
-        # query_feat = self.norm_temp(self.cross_attn(query_feat, temp_query_feat,
-        #                                             query_pos=query_pos, key_pos=temp_pos))
+        query_feat = self.norm_temp(self.cross_attn(query_feat, temp_query_feat,
+                                                    query_pos=query_pos, key_pos=temp_pos))
         
         query_feat = query_feat + query_pos
 

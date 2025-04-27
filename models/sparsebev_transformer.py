@@ -6,10 +6,16 @@ from mmcv.runner import BaseModule
 from mmcv.cnn import bias_init_with_prob
 from mmcv.cnn.bricks.transformer import MultiheadAttention, FFN
 from mmdet.models.utils.builder import TRANSFORMER
+from models.flash_attention import SparseBevFlashMHA
 from .bbox.utils import decode_bbox
 from .utils import inverse_sigmoid, DUMP
-from .sparsebev_sampling import sampling_4d, make_sample_points_from_bbox
+from .sparsebev_sampling import make_sample_points_from_bbox, sampling_4d
 from .checkpoint import checkpoint as cp
+import warnings
+from mmcv.cnn.bricks.drop import build_dropout
+from mmcv.cnn.bricks.registry import ATTENTION
+from mmcv.utils import deprecated_api_warning
+from mmcv.runner import auto_fp16
 
 
 @TRANSFORMER.register_module()
@@ -560,3 +566,201 @@ class DeformAggregation(nn.Module):
             return cp(self.inner_forward, x, query, use_reentrant=False)
         else:
             return self.inner_forward(x, query)
+        
+# Modify from MultiheadAttention
+# https://github.com/exiawsh/StreamPETR/blob/2315cf9f077817ec7089c87094ba8a63f76c2acf/projects/mmdet3d_plugin/models/utils/petr_transformer.py#L35
+@ATTENTION.register_module()
+class MultiheadFlashAttention(BaseModule):
+    def __init__(self,
+                 embed_dims,
+                 num_heads,
+                 attn_drop=0.,
+                 proj_drop=0.,
+                 dropout_layer=dict(type='Dropout', drop_prob=0.),
+                 init_cfg=None,
+                 batch_first=False,
+                 **kwargs):
+        super(MultiheadFlashAttention, self).__init__(init_cfg)
+        if 'dropout' in kwargs:
+            warnings.warn(
+                'The arguments `dropout` in MultiheadAttention '
+                'has been deprecated, now you can separately '
+                'set `attn_drop`(float), proj_drop(float), '
+                'and `dropout_layer`(dict) ', DeprecationWarning)
+            attn_drop = kwargs['dropout']
+            dropout_layer['drop_prob'] = kwargs.pop('dropout')
+
+        self.embed_dims = embed_dims
+        self.num_heads = num_heads
+        self.batch_first = batch_first
+
+        self.attention = SparseBevFlashMHA(embed_dims, num_heads, cross_attn=True, dropout=attn_drop, 
+                                           use_flash_attn=True, checkpointing=True)
+
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.dropout_layer = build_dropout(
+            dropout_layer) if dropout_layer else nn.Identity()
+
+    @deprecated_api_warning({'residual': 'identity'},
+                            cls_name='MultiheadAttention')
+    def forward(self,
+                query,
+                key=None,
+                value=None,
+                identity=None,
+                query_pos=None,
+                key_pos=None,
+                attn_mask=None,
+                key_padding_mask=None,
+                **kwargs):
+
+        if key is None:
+            key = query
+        if value is None:
+            value = key
+        if identity is None:
+            identity = query
+        if key_pos is None:
+            if query_pos is not None:
+                # use query_pos if key_pos is not available
+                if query_pos.shape == key.shape:
+                    key_pos = query_pos
+                else:
+                    warnings.warn(f'position encoding of key is'
+                                  f'missing in {self.__class__.__name__}.')
+        if query_pos is not None:
+            query = query + query_pos
+        if key_pos is not None:
+            key = key + key_pos
+
+        # NOTE Because the dataflow('key', 'query', 'value') of
+        # ``FlashMHA`` is (batch, num_query, 
+        # embed_dims), no need to adjust the shape of dataflow if self.batch_first=True
+
+        if not self.batch_first:
+            query = query.transpose(0, 1)
+            key = key.transpose(0, 1)
+            value = value.transpose(0, 1)
+
+        # out = self.attn(
+        #     q=query,
+        #     k=key,
+        #     v=value,
+        #     key_padding_mask=None)[0]
+
+        out = self.attention(x=query, x_kv=key)
+
+        if not self.batch_first:
+            out = out.transpose(0, 1)
+
+        return identity + self.dropout_layer(self.proj_drop(out))
+
+class MultiheadAttentionWrapper(nn.MultiheadAttention):
+    def __init__(self, *args, **kwargs):
+        super(MultiheadAttentionWrapper, self).__init__(*args, **kwargs)
+        self.fp16_enabled = True
+
+    @auto_fp16(out_fp32=True)
+    def forward_fp16(self, *args, **kwargs):
+        return super(MultiheadAttentionWrapper, self).forward(*args, **kwargs)
+
+    def forward_fp32(self, *args, **kwargs):
+        return super(MultiheadAttentionWrapper, self).forward(*args, **kwargs)
+    
+    def forward(self, *args, **kwargs):
+        if self.training:
+            return self.forward_fp16(*args, **kwargs)
+        else:
+            return self.forward_fp32( *args, **kwargs)
+
+# Modify from MultiheadAttention
+# https://github.com/exiawsh/StreamPETR/blob/2315cf9f077817ec7089c87094ba8a63f76c2acf/projects/mmdet3d_plugin/models/utils/petr_transformer.py#L195
+@ATTENTION.register_module()
+class MultiheadAttentionFP16(BaseModule):
+    def __init__(self,
+                 embed_dims,
+                 num_heads,
+                 attn_drop=0.,
+                 proj_drop=0.,
+                 dropout_layer=dict(type='Dropout', drop_prob=0.),
+                 init_cfg=None,
+                 batch_first=False,
+                 fp16 = False,
+                 **kwargs):
+        super(MultiheadAttentionFP16, self).__init__(init_cfg)
+        if 'dropout' in kwargs:
+            warnings.warn(
+                'The arguments `dropout` in MultiheadAttention '
+                'has been deprecated, now you can separately '
+                'set `attn_drop`(float), proj_drop(float), '
+                'and `dropout_layer`(dict) ', DeprecationWarning)
+            attn_drop = kwargs['dropout']
+            dropout_layer['drop_prob'] = kwargs.pop('dropout')
+
+        self.embed_dims = embed_dims
+        self.num_heads = num_heads
+        self.batch_first = batch_first
+        self.fp16_enabled = True
+        if fp16:
+            self.attn = MultiheadAttentionWrapper(embed_dims, num_heads, attn_drop,  **kwargs)
+        else:
+            self.attn = nn.MultiheadAttention(embed_dims, num_heads, attn_drop,  **kwargs)
+
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.dropout_layer = build_dropout(
+            dropout_layer) if dropout_layer else nn.Identity()
+
+    @deprecated_api_warning({'residual': 'identity'},
+                            cls_name='MultiheadAttention')
+    def forward(self,
+                query,
+                key=None,
+                value=None,
+                identity=None,
+                query_pos=None,
+                key_pos=None,
+                attn_mask=None,
+                key_padding_mask=None,
+                **kwargs):
+        
+        if key is None:
+            key = query
+        if value is None:
+            value = key
+        if identity is None:
+            identity = query
+        if key_pos is None:
+            if query_pos is not None:
+                # use query_pos if key_pos is not available
+                if query_pos.shape == key.shape:
+                    key_pos = query_pos
+                else:
+                    warnings.warn(f'position encoding of key is'
+                                  f'missing in {self.__class__.__name__}.')
+        if query_pos is not None:
+            query = query + query_pos
+        if key_pos is not None:
+            key = key + key_pos
+
+        # Because the dataflow('key', 'query', 'value') of
+        # ``torch.nn.MultiheadAttention`` is (num_query, batch,
+        # embed_dims), We should adjust the shape of dataflow from
+        # batch_first (batch, num_query, embed_dims) to num_query_first
+        # (num_query ,batch, embed_dims), and recover ``attn_output``
+        # from num_query_first to batch_first.
+        if self.batch_first:
+            query = query.transpose(0, 1).contiguous()
+            key = key.transpose(0, 1).contiguous()
+            value = value.transpose(0, 1).contiguous()
+
+        out = self.attn(
+            query=query,
+            key=key,
+            value=value,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask)[0]
+
+        if self.batch_first:
+            out = out.transpose(0, 1).contiguous()
+
+        return identity + self.dropout_layer(self.proj_drop(out))
