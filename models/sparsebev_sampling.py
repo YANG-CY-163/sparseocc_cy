@@ -152,8 +152,21 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     scale_weights = scale_weights.reshape(B, Q, G, T, P, -1)
     scale_weights = scale_weights.permute(0, 2, 3, 1, 4, 5)
     scale_weights = scale_weights.reshape(B*G*T, Q, P, -1)
+    
+    # in case of different number of frames in voxel decoder and masktransformer
+    mlvl_feats_sampling = mlvl_feats
+    mlvl_feats_single_frame = []
+    if mlvl_feats[0].shape[0] > B*T*G and T == 1:
+        for lvl, feat in enumerate(mlvl_feats):
+            _, _, H, W, C = feat.shape
+            feat = feat.reshape(B, 8, G, N, H, W, C)  # [B, T, G, N, H, W, C]
+            feat = feat[:, 0, ...]  # [B, G, N, H, W, C]
+            feat = feat.reshape(B*T*G, N, H, W, C)
+            mlvl_feats_single_frame.append(feat.contiguous())
+        
+        mlvl_feats_sampling = mlvl_feats_single_frame
 
-    final = msmv_sampling(mlvl_feats, sample_points_cam, scale_weights)
+    final = msmv_sampling(mlvl_feats_sampling, sample_points_cam, scale_weights)
     C = final.shape[2]  # [BTG, Q, C, P]
     final = final.reshape(B, T, G, Q, C, P)
     final = final.permute(0, 3, 2, 1, 5, 4)
