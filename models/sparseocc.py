@@ -44,6 +44,8 @@ class SparseOcc(MVXTwoStageDetector):
         self.memory = {}
         self.queue = queue.Queue()
 
+        self.test_flag = False
+
     @auto_fp16(apply_to=('img'), out_fp32=True)
     def extract_img_feat(self, img):
         img_feats = self.img_backbone(img)
@@ -124,10 +126,20 @@ class SparseOcc(MVXTwoStageDetector):
 
     @force_fp32(apply_to=('img'))
     def forward_train(self, img_metas=None, img=None, voxel_semantics=None, voxel_instances=None, instance_class_ids=None, mask_camera=None, **kwargs):
+        if self.test_flag: # for interval evaluation
+            self.pts_bbox_head.transformer.voxel_decoder.reset_memory()
+            self.test_flag = False
+            #self.prev_scene_token = None  # NOTE important when use different bs and custom_gpu_test in interval eval
+
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
         return self.forward_pts_train(img_feats, voxel_semantics, voxel_instances, instance_class_ids, mask_camera, img_metas)
 
     def forward_test(self, img_metas, img=None, **kwargs):
+
+        if not self.test_flag: # for interval evaluation
+            self.pts_bbox_head.transformer.voxel_decoder.reset_memory()
+            self.test_flag = True
+
         output = self.simple_test(img_metas, img)
 
         sem_pred = output['sem_pred'].cpu().numpy().astype(np.uint8)

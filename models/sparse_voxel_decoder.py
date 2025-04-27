@@ -93,7 +93,8 @@ class SparseVoxelDecoder(BaseModule):
                  num_groups=num_groups,
                  num_levels=num_levels,
                  pc_range=pc_range,
-                 self_attn=i in [0, 1]
+                 self_attn=i in [0, 1],
+                 cross_attn=i in [0, 1, 2],
             ))
             self.lift_feat_heads.append(nn.Sequential(
                 nn.Linear(embed_dims, embed_dims * 8),
@@ -105,32 +106,30 @@ class SparseVoxelDecoder(BaseModule):
                 self.seg_pred_heads.append(nn.Linear(embed_dims, num_classes))
 
         # init memory
-        self.num_history = memory_config['num_history']
         self.max_time_interval = memory_config['max_time_interval']
         self.memory_len = memory_config['memory_len']
-        self.len_per_frame = memory_config['len_per_frame']
+        #self.len_per_frame = memory_config['len_per_frame']
         self.interval = memory_config['interval']
         
         self.metas = None
         self.mask = None
-
-        # Initialize memory banks: List[List[Dict]]
-        # Outer list: layers, Inner list: time steps (FIFO queue)
         self.memory_banks = [[] for _ in range(num_layers)]
 
-        self.padding_bbox = nn.Embedding(self.num_history, 3)  # (x, y, z)
 
     @torch.no_grad()
     def init_weights(self):
         for i in range(len(self.decoder_layers)):
             self.decoder_layers[i].init_weights()
 
-    def forward(self, mlvl_feats, img_metas, reset_memory=False):
-        # TODO reset memory in sparseocc.py
-        if reset_memory:
-            self.memory_banks = [[] for _ in range(self.num_layers)]
-            self.metas = None
+    def reset_memory(self):
+        """
+        Resets the memory bank for all layers.
+        """
+        self.memory_banks = [[] for _ in range(self.num_layers)]
+        self.metas = None
+        self.mask = None
 
+    def forward(self, mlvl_feats, img_metas):
         occ_preds = []
         
         topk = self.topk_training if self.training else self.topk_testing
@@ -249,8 +248,6 @@ class SparseVoxelDecoder(BaseModule):
             'feat': query_feat.detach(),
             'coord': query_point.detach()
         }
-        import pdb; pdb.set_trace()
-        # Append new memory
         self.memory_banks[layer_idx].append(memory_entry)
 
         if layer_idx == 0:
@@ -274,7 +271,8 @@ class SparseVoxelDecoderLayer(BaseModule):
                  num_groups=None,
                  num_levels=None,
                  pc_range=None,
-                 self_attn=True):
+                 self_attn=True,
+                 cross_attn=False):
         super().__init__()
 
         self.position_encoder = nn.Sequential(
@@ -294,7 +292,13 @@ class SparseVoxelDecoderLayer(BaseModule):
 
         #self.cross_attn = TimeAdaptiveAttention(embed_dims, num_heads=8, dropout=0.1, frames=4, num_per_frame=256)
         #self.cross_attn = MultiheadAttention(embed_dims, num_heads=8, dropout=0.1, batch_first=True)
-        self.cross_attn = MultiheadFlashAttention(embed_dims, num_heads=8, dropout=0.1, batch_first=True)
+        if cross_attn:
+            self.cross_attn = MultiheadFlashAttention(embed_dims, num_heads=8, dropout=0.1, batch_first=True)
+            self.norm_temp = nn.LayerNorm(embed_dims)
+        else:
+            self.cross_attn = None
+            self.norm_temp = None
+
         
         self.sampling = SparseBEVSampling(
             embed_dims=embed_dims,
@@ -314,7 +318,6 @@ class SparseVoxelDecoderLayer(BaseModule):
         
         self.norm2 = nn.LayerNorm(embed_dims)
         self.norm3 = nn.LayerNorm(embed_dims)
-        self.norm_temp = nn.LayerNorm(embed_dims)
 
     @torch.no_grad()
     def init_weights(self):
@@ -328,17 +331,15 @@ class SparseVoxelDecoderLayer(BaseModule):
         query_pos = self.position_encoder(query_bbox[..., :3])  # [B, N, C]
 
         # temporal attn
-        if self.training:
+        if self.cross_attn:
             if temp_query_bbox is not None:
                 temp_pos = self.position_encoder(temp_query_bbox)
             else:
                 temp_pos = None
-        else:
-            if DUMP.stage_count == 0 and temp_query_bbox is not None:
-                temp_pos = self.position_encoder(temp_query_bbox)
 
-        query_feat = self.norm_temp(self.cross_attn(query_feat, temp_query_feat,
-                                                    query_pos=query_pos, key_pos=temp_pos))
+        if self.cross_attn is not None:
+            query_feat = self.norm_temp(self.cross_attn(query_feat, temp_query_feat,
+                                                        query_pos=query_pos, key_pos=temp_pos))
         
         query_feat = query_feat + query_pos
 
