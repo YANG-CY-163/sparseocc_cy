@@ -34,10 +34,10 @@ input_modality = dict(
     use_external=False
 )
 
-batch_size = 2
+batch_size = 12
 num_iters_per_epoch = 28130 // (batch_size)
-num_epochs = 60
-checkpoint_epoch_interval = 10
+num_epochs = 24
+checkpoint_epoch_interval = 12
 
 queue_length = 1
 num_frame_losses = 1
@@ -96,10 +96,8 @@ model = dict(
             topk_training=_topk_training_,
             topk_testing=_topk_testing_,
             voxel_memory_config=dict(
-                num_history=500,
                 max_time_interval=2,
-                memory_len=1024,
-                len_per_frame=256,
+                memory_len=1,
                 interval=1),),
         loss_cfgs=dict(
             loss_mask2former=dict(
@@ -142,7 +140,7 @@ bda_aug_conf = dict(
 
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
-    #dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1),
+    dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1),
     dict(type='BEVAug', bda_aug_conf=bda_aug_conf, classes=det_class_names, is_train=True),
     dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=True),
@@ -166,7 +164,7 @@ test_pipeline = [
 
 data = dict(
     samples_per_gpu=batch_size,
-    workers_per_gpu=0,
+    workers_per_gpu=8,
     train=dict(
         type=dataset_type,
         data_root=dataset_root,
@@ -180,8 +178,7 @@ data = dict(
         num_frame_losses=num_frame_losses,
         seq_split_num=2, # streaming video training
         seq_mode=True, # streaming video training
-        test_mode=False,
-        load_interval=1000
+        test_mode=False
     ),
     val=dict(
         type=dataset_type,
@@ -240,7 +237,7 @@ revise_keys = [('backbone', 'img_backbone')]
 resume_from = None
 
 # checkpointing
-checkpoint_config = dict(interval=1, max_keep_ckpts=1)
+checkpoint_config = dict(interval=num_iters_per_epoch*checkpoint_epoch_interval, max_keep_ckpts=1, by_epoch=False)
 
 # logging
 log_config = dict(
@@ -248,7 +245,7 @@ log_config = dict(
     hooks=[
         dict(type='MyTextLoggerHook', by_epoch=False, interval=1, reset_flag=True),
         #dict(type='MyTensorboardLoggerHook', interval=500, reset_flag=True)
-        #dict(type='MyWandbLoggerHook', by_epoch=False, interval=500, reset_flag=True, commit=True, project_name='SparseOcc', team_name='liuhs-team')
+        dict(type='MyWandbLoggerHook', by_epoch=False, interval=500, reset_flag=True, commit=True, project_name='SparseOcc', team_name='liuhs-team')
     ]
 )
 
