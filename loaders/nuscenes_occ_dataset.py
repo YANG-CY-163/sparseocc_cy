@@ -118,28 +118,30 @@ class NuSceneOcc(NuScenesDataset):
         Returns:
             dict: Training data dict of the corresponding index.
         """
-        queue = []
-        index_list = list(range(index-self.queue_length-self.random_length+1, index))
-        random.shuffle(index_list)
-        index_list = sorted(index_list[self.random_length:])
-        index_list.append(index)
+        # for sliding window
+        # queue = []
+        # index_list = list(range(index-self.queue_length-self.random_length+1, index))
+        # random.shuffle(index_list)
+        # index_list = sorted(index_list[self.random_length:])
+        # index_list.append(index)
+        # prev_scene_token = None
+        # for i in index_list:
+        #     i = max(0, i)
         prev_scene_token = None
-        for i in index_list:
-            i = max(0, i)
-            input_dict = self.get_data_info(i)
+        input_dict = self.get_data_info(index)
             
-            if not self.seq_mode: # for sliding window 
-                if input_dict['scene_token'] != prev_scene_token:
-                    input_dict.update(dict(prev_exists=False))
-                    prev_scene_token = input_dict['scene_token']
-                else:
-                    input_dict.update(dict(prev_exists=True))
-            
-            self.pre_pipeline(input_dict)
-            example = self.pipeline(input_dict)
-            queue.append(example)
+        if not self.seq_mode: # for sliding window 
+            if input_dict['scene_name'] != prev_scene_token:
+                input_dict.update(dict(prev_exists=False))
+                prev_scene_token = input_dict['scene_name']
+            else:
+                input_dict.update(dict(prev_exists=True))
+        
+        self.pre_pipeline(input_dict)
+        example = self.pipeline(input_dict)
+        #queue.append(example)
 
-        return self.union2one(queue)
+        return example
     
     def prepare_test_data(self, index):
         """Prepare data for testing.

@@ -241,6 +241,76 @@ class SparseBEVSelfAttention(BaseModule):
 
         return dist
 
+class TimeAdaptiveAttention(BaseModule):
+    """Scale-adaptive Self Attention"""
+    def __init__(self, embed_dims=256, num_heads=8, dropout=0.1, frames=4, num_per_frame=256, init_cfg=None):
+        super().__init__(init_cfg)
+
+        self.attention = MultiheadAttention(embed_dims, num_heads, dropout, batch_first=True)
+        self.gen_tau = nn.Linear(embed_dims, num_heads)
+
+        self.num_per_frame = num_per_frame
+
+        cross_dist = self.pre_calc_time_interval(frames)
+        self.register_buffer('cross_dist', cross_dist)
+        self.register_buffer('query_dist', torch.ones(1, dtype=torch.float32))
+
+    @torch.no_grad()
+    def init_weights(self):
+        nn.init.zeros_(self.gen_tau.weight)
+        nn.init.uniform_(self.gen_tau.bias, 0.0, 2.0)
+
+    def pre_calc_time_interval(self, frames):
+        """
+        query_time_stamp: 0  
+        key_time_stamp: [1, 2, ..., T]
+        """
+        key_time_stamp = torch.arange(frames, dtype=torch.float32) + 1  #[T]
+        dist = key_time_stamp[None, None, :].repeat_interleave(self.num_per_frame, dim=-1)  # [1, 1, K]
+
+        dist = -dist  # [1, 1, K]
+
+        return dist
+    
+    def inner_forward(self, query_feat, temp_feat, query_pos, key_pos):
+        """
+        query_bbox: [B, Q, 10]
+        query_feat: [B, Q, C]
+        """
+        if temp_feat is not None:
+            B, Q = query_feat.shape[:2]
+            dist = self.cross_dist[..., :temp_feat.shape[1]].expand(B, Q, -1)  # [1, 1, K]
+        else:
+            B, Q = query_feat.shape[:2]
+            dist = self.query_dist.expand(B, Q, Q)  # [B, Q, Q]
+
+        tau = self.gen_tau(query_feat)  # [B, Q, 8]
+
+        tau = tau.permute(0, 2, 1)  # [B, 8, Q]
+        attn_mask = dist[:, None, :, :] * tau[..., None]  # [B, 8, Q, K]
+
+        attn_mask = attn_mask.flatten(0, 1)  # [Bx8, Q, K]
+        
+        return self.attention(query_feat, temp_feat, temp_feat, query_pos=query_pos, key_pos=key_pos, attn_mask=attn_mask)
+
+    def forward(self, query_feat, temp_feat, query_pos, key_pos):
+        if self.training and query_feat.requires_grad:
+            return cp(self.inner_forward,  query_feat, temp_feat, query_pos, key_pos, use_reentrant=False)
+        else:
+            return self.inner_forward(query_feat, temp_feat, query_pos, key_pos)
+
+    @torch.no_grad()
+    def calc_time_interval(self, query_time_stamp, key_time_stamp, bs, num_query):
+        """
+        query_time_stamp: 0  
+        key_time_stamp: [1, 2, ..., T]
+        """
+        dist = key_time_stamp[None, :] - query_time_stamp[:, None] # [1, T]
+        dist = dist[None, :, :].expand(bs, num_query, -1).repeat_interleave(self.num_per_frame, dim=-1)  # [B, Q, K]
+
+        dist = -dist  # [B, Q, K]
+
+        return dist
 
 class SparseBEVSampling(BaseModule):
     def __init__(self, embed_dims=256, num_frames=4, num_groups=4, num_points=8, num_levels=4, pc_range=[], init_cfg=None):

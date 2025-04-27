@@ -26,14 +26,15 @@ class SparseOccTransformer(BaseModule):
                  pc_range=None,
                  occ_size=None,
                  topk_training=None,
-                 topk_testing=None):
+                 topk_testing=None,
+                 voxel_memory_config=None):
         super().__init__()
         self.num_frames = num_frames
         
         self.voxel_decoder = SparseVoxelDecoder(
             embed_dims=embed_dims,
             num_layers=3,
-            num_frames=num_frames,
+            num_frames=1,  # TODO hard code
             num_points=num_points,
             num_groups=num_groups,
             num_levels=num_levels,
@@ -41,7 +42,8 @@ class SparseOccTransformer(BaseModule):
             pc_range=pc_range,
             semantic=True,
             topk_training=topk_training,
-            topk_testing=topk_testing
+            topk_testing=topk_testing,
+            memory_config=voxel_memory_config
         )
         self.decoder = MaskFormerOccDecoder(
             embed_dims=embed_dims,
@@ -70,13 +72,20 @@ class SparseOccTransformer(BaseModule):
             feat = feat.reshape(B*T*G, N, H, W, C)  # [BTG, N, H, W, C]
             mlvl_feats[lvl] = feat.contiguous()
         
-        lidar2img = np.asarray([m['lidar2img'] for m in img_metas]).astype(np.float32)
-        lidar2img = torch.from_numpy(lidar2img).to(feat.device)  # [B, N, 4, 4]
+        lidar2img = torch.stack([m['lidar2img'].data for m in img_metas]).to(feat.device)  # [B, N, 4, 4]
+        ego_pose = torch.stack([m['ego_pose'].data for m in img_metas]).to(feat.device)  # [B, N, 4, 4]
+        ego_pose_inv = torch.stack([m['ego_pose_inv'].data for m in img_metas]).to(feat.device)  # [B, N, 4, 4]
+        # TODO timestamp
+        timestamp = torch.stack([m['timestamp'].data for m in img_metas]).to(feat.device)  # [B, N, 4, 4]
+               
         ego2lidar = np.asarray([m['ego2lidar'] for m in img_metas]).astype(np.float32)
         ego2lidar = torch.from_numpy(ego2lidar).to(feat.device)  # [B, N, 4, 4]
-        
+
         img_metas = copy.deepcopy(img_metas)
         img_metas[0]['lidar2img'] = torch.matmul(lidar2img, ego2lidar)
+        img_metas[0]['ego_pose'] = ego_pose
+        img_metas[0]['ego_pose_inv'] = ego_pose_inv
+        img_metas[0]['timestamp'] = timestamp
 
         occ_preds = self.voxel_decoder(mlvl_feats, img_metas=img_metas)
         mask_preds, class_preds = self.decoder(occ_preds, mlvl_feats, img_metas)

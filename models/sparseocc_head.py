@@ -6,7 +6,7 @@ from mmcv.runner import force_fp32, auto_fp16
 from mmdet.models.builder import build_loss
 from mmdet.models.utils import build_transformer
 
-from models.utils import batch_indexing, history_bbox_warp
+from models.utils import batch_indexing
 from .matcher import HungarianMatcher
 from .loss_utils import CE_ssc_loss, lovasz_softmax, get_voxel_decoder_loss_input
 
@@ -45,22 +45,6 @@ class SparseOccHead(nn.Module):
 
         self.class_weights = torch.from_numpy(1 / np.log(NUSC_CLASS_FREQ + 0.001))
 
-        # init memory
-        self.num_history = memory_config['num_history']
-        self.max_time_interval = memory_config['max_time_interval']
-        self.memory_len = memory_config['memory_len']
-        self.len_per_frame = memory_config['len_per_frame']
-        self.interval = memory_config['interval']
-        
-        self.propagate_feat = None
-        self.propagate_bbox = None
-        self.metas = None
-        self.mask = None
-        self.cls_scores = None
-        self.memory_feat = None
-        self.memory_bbox = None
-
-        self.padding_bbox = nn.Embedding(self.num_history, 3)  # (x, y, z)
 
     def init_weights(self):
         self.transformer.init_weights()
@@ -249,84 +233,3 @@ class SparseOccHead(nn.Module):
         semantic_seg = semantic_seg.unsqueeze(0)
         
         return instance_seg, semantic_seg  # [B, N]
-
-    def temporal_warp(self, **data):
-
-        if self.propagate_bbox is not None:
-            
-            time_interval = (data["timestamp"] - self.metas["timestamp"]).to(self.propagate_bbox.device)
-            pc_range = self.pc_range.to(self.propagate_bbox.device)
-            T_temp2cur = data["ego_pose_inv"]  @ self.metas["ego_pose"]  # global2lidar @ lidar2global
-            
-            self.propagate_bbox = history_bbox_warp(self.propagate_bbox, T_temp2cur, time_interval, pc_range)
-            self.memory_bbox = history_bbox_warp(self.memory_bbox, T_temp2cur, time_interval, pc_range)
-            
-            # self.mask = data['prev_exists'].bool()
-            valid_mask = (torch.abs(time_interval) <= self.max_time_interval)
-            self.mask = valid_mask
-
-        if self.interval == 1 :
-            return self.memory_feat, self.memory_bbox
-        
-        else:
-            if self.memory_feat is not None and self.memory_feat.shape[1] > self.len_per_frame:
-                num_frames = self.memory_feat.shape[1] // self.len_per_frame
-
-                return torch.cat([self.memory_feat[:, i * self.len_per_frame: i * self.len_per_frame + self.len_per_frame] for i in range(1, num_frames, 2)], dim=1), \
-                    torch.cat([self.memory_bbox[:, i * self.len_per_frame: i * self.len_per_frame + self.len_per_frame] for i in range(1, num_frames, 2)], dim=1)
-                
-            else:
-                return None, None
-
-    def propagate(self, query_feat, query_bbox):
-        padding_feature = query_feat[:, -2:-1, :].repeat(1, self.num_history, 1)  # [B, K, C]
-        padding_bbox = self.padding_bbox.weight.clone()  # [K, 10]
-        padding_bbox = padding_bbox[None].repeat(query_bbox.shape[0], 1, 1)  # [B, K, 10]
-        
-        if self.propagate_feat is not None:
-            # not update if history and curr is not adj frame
-            padding_bbox = torch.where(self.mask[:, None, None], self.propagate_bbox, padding_bbox)
-            padding_feature = torch.where(self.mask[:, None, None], self.propagate_feat, padding_feature)
-            # padding_bbox[self.mask] = self.propagate_bbox[self.mask]
-            # padding_feature[self.mask] = self.propagate_feat[self.mask]
-
-        query_feat = torch.cat([query_feat, padding_feature], dim=1)
-        query_bbox = torch.cat([query_bbox, padding_bbox], dim=1)
-        
-        return query_feat, query_bbox
-    
-    def update_memory(self, outs_dec, bbox_preds, cls_scores, mask_dict=None, **metas):
-
-        if self.num_history > 0:  # 500
-            # NOTE add use dn
-            if self.training and mask_dict and mask_dict['pad_size'] > 0:
-                outs_dec = outs_dec[:, mask_dict['pad_size']:, :]
-                bbox_preds = bbox_preds[:, mask_dict['pad_size']:, :]
-                cls_scores = cls_scores[:, mask_dict['pad_size']:, :]
-            
-            outs_dec = outs_dec.detach()
-            bbox_preds = bbox_preds.detach()
-            cls_scores = cls_scores.detach()  # [B, Q, 10]
-
-            self.metas = metas
-
-            cls_scores, _ = cls_scores.max(-1)  # [B, Q]
-            cls_scores, indices = torch.topk(cls_scores, k=self.num_history, dim=1)  # [B, K]
-            
-            self.cls_scores = torch.sigmoid(cls_scores)
-            self.propagate_feat = batch_indexing(outs_dec, indices, layout='channel_last')  # [B, K, C]
-            self.propagate_bbox = batch_indexing(bbox_preds, indices, layout='channel_last')  # [B, K, 10]
-            
-            # TODO memory queue is for cross attn
-            # not merge cached query and memory queue 
-            # since self.len_per_frame is 256 and self.num_history is 500 for now
-            memory_bbox = self.propagate_bbox[:, :self.len_per_frame]
-            memory_feat = self.propagate_feat[:, :self.len_per_frame]
-            
-            # update memory queue
-            if self.memory_feat is None:
-                self.memory_feat = memory_feat
-                self.memory_bbox = memory_bbox
-            else:
-                self.memory_feat = torch.cat([memory_feat, self.memory_feat], dim=1)[:, :self.memory_len]
-                self.memory_bbox = torch.cat([memory_bbox, self.memory_bbox], dim=1)[:, :self.memory_len]

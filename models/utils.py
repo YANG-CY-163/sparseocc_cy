@@ -33,43 +33,28 @@ def sparse2dense(indices, value, dense_shape, empty_value=0):
 
     return dense, mask
 
-def history_bbox_warp(bbox, T_temp2cur, time_diff, pc_range=None):
+torch.no_grad()
+def history_coord_warp(points, T_temp2cur, pc_range):
+    """
+    Warp historical points to the current frame.
+    Args:
+        points (Tensor): Points from the previous frame [B, N, 3].
+        T_temp2cur (Tensor): Transformation matrix from previous to current frame [B, 4, 4].
+        pc_range (Tensor): Point cloud range.
+    Returns:
+        Tensor: Warped points [B, N, 3].
+    """
+    points_hom = F.pad(points, (0, 1), value=1.0)  # [B, N, 4]
+    warped_points_hom = torch.einsum('bmn,bnk->bmk', T_temp2cur, points_hom.transpose(1, 2)).transpose(1, 2) # [B, N, 4]
+    # Normalize and get Cartesian coordinates
+    warped_points = warped_points_hom[..., :3] / warped_points_hom[..., 3:] # [B, N, 3]
 
-    T_temp2cur = torch.unsqueeze(T_temp2cur,  dim=1)  # [B, 1, 4, 4]
-    
-    pc_range_min = pc_range[:3]
-    pc_range_max = pc_range[3:6]
-    pc_range_scale = pc_range_max - pc_range_min
-    
-    out_bbox = bbox.clone()
-    center = out_bbox[..., :3] * pc_range_scale + pc_range_min  # [B, K, 3]
-    
-    # there is no vel_dim for box in waymo
-    if bbox.shape[-1] > 8:
-        # warp center based on velocity
-        vel = bbox[..., -2:]  # [B, K, 2]
-        dist = vel * time_diff[..., None, None].to(dtype=vel.dtype)  # [B, 1, 1]
-        center = torch.cat([
-            center[..., 0:2] + dist,
-            center[..., 2:3]
-        ], dim=-1)
+    # Optional: Clamp coordinates to pc_range (or handle out-of-range points)
+    # warped_coords[..., 0] = torch.clamp(warped_coords[..., 0], min=pc_range[0], max=pc_range[3])
+    # warped_coords[..., 1] = torch.clamp(warped_coords[..., 1], min=pc_range[1], max=pc_range[4])
+    # warped_coords[..., 2] = torch.clamp(warped_coords[..., 2], min=pc_range[2], max=pc_range[5])
 
-    center = torch.cat([center, torch.ones_like(center[..., :1])], dim=-1)  # [B, K, 4]
-    
-    yaw = torch.cat([out_bbox[..., 6:8].flip(-1), torch.zeros_like(center[..., :2])], dim=-1)  # [B, K, 4]
-    vel_mat = torch.cat([out_bbox[..., -2:], torch.zeros_like(center[..., :2])], dim=-1)  # [B, K, 4]
-    box_mat = torch.stack([center, yaw, vel_mat], dim=-1)  # [B, K, 4, 3]
-
-    warpped_box = T_temp2cur @ box_mat  # [B, 1, 4, 4] @ [B, K, 4, 3] -> [B, K, 4, 3]
-    
-    transformed_center = warpped_box[..., :3, 0]  # [B, K, 3]
-    
-    out_bbox[..., :3] = (transformed_center - pc_range_min) / pc_range_scale
-    out_bbox[..., 6:8] = warpped_box[..., :2, 1].flip(-1)  # [B, K, 2]
-    if bbox.shape[-1] > 8:
-        out_bbox[..., -2:] = warpped_box[..., :2, 2]  # [B, K, 2]
-    
-    return out_bbox
+    return warped_points
 
 # https://github.com/exiawsh/StreamPETR/blob/2315cf9f077817ec7089c87094ba8a63f76c2acf/projects/mmdet3d_plugin/models/utils/misc.py#L7
 def memory_refresh(memory, prev_exist):
