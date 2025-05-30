@@ -10,9 +10,11 @@ import torch.backends.cudnn as cudnn
 from mmcv import Config
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import load_checkpoint
-from mmdet.apis import set_random_seed, multi_gpu_test, single_gpu_test
-from mmdet3d.datasets import build_dataset, build_dataloader
+from mmdet.apis import set_random_seed, single_gpu_test
+from mmdet3d.datasets import build_dataset
 from mmdet3d.models import build_model
+from loaders.builder import build_dataloader
+from utils import custom_multi_gpu_test
 
 
 def evaluate(dataset, results):
@@ -104,7 +106,7 @@ def main():
         )
 
     if world_size > 1:
-        results = multi_gpu_test(model, val_loader, gpu_collect=True)
+        results = custom_multi_gpu_test(model, val_loader, gpu_collect=True)
     else:
         results = single_gpu_test(model, val_loader)
 

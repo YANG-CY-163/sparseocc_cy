@@ -263,7 +263,8 @@ class NuSceneOcc(NuScenesDataset):
             occ_loc = torch.from_numpy(occ_pred['occ_loc'].astype(np.int64))  # [B, N, 3]
             
             data_type = self.occ_gt_root.split('/')[-1]
-            if data_type == 'occ3d' or data_type == 'occ3d_panoptic':
+            print(data_type)
+            if data_type == 'occ3d' or data_type == 'occ3d_panoptic' or data_type == 'occupancy':
                 occ_class_names = occ3d_class_names
             elif data_type == 'openocc_v2':
                 occ_class_names = openocc_class_names

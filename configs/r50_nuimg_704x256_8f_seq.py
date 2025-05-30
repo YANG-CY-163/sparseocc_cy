@@ -37,7 +37,7 @@ input_modality = dict(
 batch_size = 12
 num_iters_per_epoch = 28130 // (batch_size)
 num_epochs = 24
-checkpoint_epoch_interval = 12
+checkpoint_epoch_interval = 6
 
 queue_length = 1
 num_frame_losses = 1
@@ -152,7 +152,7 @@ train_pipeline = [
 
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
-    #dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1, test_mode=True),
+    dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1, test_mode=True),
     dict(type='BEVAug', bda_aug_conf=bda_aug_conf, classes=det_class_names, is_train=False),
     dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=False),
@@ -208,7 +208,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW',
-    lr=4e-4,
+    lr=5e-4,
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1),
